@@ -20,18 +20,64 @@ int  rcon_tcp_send (RCON_TcpSocket *sock, const void *buf, int len);
 int  rcon_tcp_recv (RCON_TcpSocket *sock, void *buf, int len);
 void rcon_tcp_close(RCON_TcpSocket *sock);
 
-RCON_SocketStrip *rcon_socket_strip_alloc(void);
-int  rcon_socket_strip_check (RCON_SocketStrip *strip, unsigned timeoutMs);
+void rcon_socket_strip_init  (RCON_SocketStrip *strip);
+int  rcon_socket_strip_check (RCON_SocketStrip *strip, long timeoutMs);
 int  rcon_socket_strip_add   (RCON_SocketStrip *strip, RCON_TcpSocket *sock);
 int  rcon_socket_strip_remove(RCON_SocketStrip *strip, RCON_TcpSocket *sock);
-void rcon_socket_strip_free  (RCON_SocketStrip *strip);
 int  rcon_socket_strip_ready (RCON_SocketStrip *strip, RCON_TcpSocket *sock);
 
-Rcon *rcon_create (void *cmdState);
+Rcon *rcon_create (void *userdata);
 void  rcon_destroy(Rcon *rc);
-void  rcon_update (Rcon *rc);
+void  rcon_update (Rcon *rc, long timeoutMs);
 
 #ifdef RCON_IMPLEMENTATION
+
+// On Unixoid systems, we need POSIX-specific interfaces that won't be visible normally.
+#ifndef _WIN32
+# define _POSIX_C_SOURCE 200809L
+#endif
+
+// On Windows: bump up max number of sockets per select() call.
+// On any system: Use this number as limit for socket strip size.
+#define FD_SETSIZE 128
+
+#ifdef _WIN32
+
+# include <winsock2.h>
+# include <ws2tcpip.h>
+
+// Winsock brings its own closesocket, INVALID_SOCKET, SOCKET_ERROR
+
+static inline int
+is_benign_error(void)
+{
+	int err = WSAGetLastError();
+	return err == WSAEINTR || err == WSAEWOULDBLOCK;
+}
+
+#else
+
+# include <sys/types.h>
+# include <sys/socket.h>
+# include <sys/select.h>
+# include <unistd.h>
+# include <fcntl.h>
+# include <netdb.h>
+# include <errno.h>
+
+// We mimic Winsock on Unixoid systems here, since it's easier than
+// the other way around.
+# define closesocket close
+# define INVALID_SOCKET -1
+# define SOCKET_ERROR -1
+
+static inline int
+is_benign_error(void)
+{
+	return errno == EINTR || errno == EWOULDBLOCK || errno == EAGAIN;
+}
+
+#endif
 
 #include <stdint.h>
 #include <stdio.h>
@@ -49,6 +95,18 @@ void  rcon_update (Rcon *rc);
 #define RCON_SERVERDATA_EXECCOMMAND    2
 #define RCON_SERVERDATA_RESPONSE_VALUE 0
 
+struct rcon_tcp_socket {
+	int fd;
+	struct sockaddr_storage myAddr;
+	socklen_t myAddrLen;
+};
+
+struct rcon_socket_strip {
+	int fds[FD_SETSIZE];
+	fd_set rfds;
+	int count;
+};
+
 struct rcon_client {
 	RCON_TcpSocket *socket;
 	int recvd;
@@ -57,22 +115,22 @@ struct rcon_client {
 };
 
 struct rcon {
-	RCON_SocketStrip  *strip;
+	RCON_SocketStrip   strip;
 	RCON_TcpSocket    *server;
 	struct rcon_client clients[RCON_MAX_CLIENTS];
 	char            *(*eval)(void *userdata, const char *msg, size_t len);
-	void              *cmdState;
+	void              *userdata;
 };
 
 Rcon *
-rcon_create(void *cmdState)
+rcon_create(void *userdata)
 {
 	Rcon *rc = calloc(1, sizeof *rc);
 	if (!rc) return NULL;
-	rc->cmdState = cmdState;
-	rc->strip = rcon_socket_strip_alloc();
+	rc->userdata = userdata;
+	rcon_socket_strip_init(&rc->strip);
 	rc->server = rcon_tcp_listen("0.0.0.0", RCON_PORT);
-	rcon_socket_strip_add(rc->strip, rc->server);
+	rcon_socket_strip_add(&rc->strip, rc->server);
 	return rc;
 }
 
@@ -80,7 +138,6 @@ void
 rcon_destroy(Rcon *rc)
 {
 	if (!rc) return;
-	rcon_socket_strip_free(rc->strip);
 	for (int i = 0; i < RCON_MAX_CLIENTS; i++) {
 		rcon_tcp_close(rc->clients[i].socket);
 		rc->clients[i].inUse = 0;
@@ -146,7 +203,7 @@ rcon_process(Rcon *rc, struct rcon_client *client, int pktLen, unsigned char *pa
 
 	case RCON_SERVERDATA_EXECCOMMAND:
 		{
-			char *result = rc->eval(rc->cmdState, payload, payLen);
+			char *result = rc->eval(rc->userdata, payload, payLen);
 			rcon_send(client, rid, RCON_SERVERDATA_RESPONSE_VALUE,
 				(const unsigned char *)result, (int)strlen(result));
 			free(result);
@@ -165,13 +222,13 @@ rcon_process(Rcon *rc, struct rcon_client *client, int pktLen, unsigned char *pa
 }
 
 void
-rcon_update(Rcon *rc)
+rcon_update(Rcon *rc, long timeoutMs)
 {
-	if (rcon_socket_strip_check(rc->strip, 0) <= 0) return;
+	if (rcon_socket_strip_check(&rc->strip, timeoutMs) <= 0) return;
 	for (int i = 0; i < RCON_MAX_CLIENTS; i++) {
 		struct rcon_client *client = &rc->clients[i];
 		if (!client->inUse) continue;
-		if (!rcon_socket_strip_ready(rc->strip, client->socket)) continue;
+		if (!rcon_socket_strip_ready(&rc->strip, client->socket)) continue;
 		int drop = 0;
 		// TODO proper handling of huge input
 		int got = rcon_tcp_recv(client->socket,
@@ -198,12 +255,12 @@ rcon_update(Rcon *rc)
 		}
 		if (drop) {
 			rcon_log("Dropping RCON client.");
-			rcon_socket_strip_remove(rc->strip, client->socket);
+			rcon_socket_strip_remove(&rc->strip, client->socket);
 			rcon_tcp_close(client->socket);
 			client->inUse = 0;
 		}
 	}
-	if (rcon_socket_strip_ready(rc->strip, rc->server)) {
+	if (rcon_socket_strip_ready(&rc->strip, rc->server)) {
 		RCON_TcpSocket *socket = rcon_tcp_accept(rc->server);
 		if (socket) {
 			int i;
@@ -214,7 +271,7 @@ rcon_update(Rcon *rc)
 				rc->clients[i].socket = socket;
 				rc->clients[i].recvd = 0;
 				rc->clients[i].inUse = 1;
-				rcon_socket_strip_add(rc->strip, socket);
+				rcon_socket_strip_add(&rc->strip, socket);
 			} else {
 				rcon_tcp_close(socket);
 			}
@@ -222,55 +279,8 @@ rcon_update(Rcon *rc)
 	}
 }
 
-// On Unixoid systems, we need POSIX-specific interfaces that won't be visible normally.
-#ifndef _WIN32
-# define _POSIX_C_SOURCE 200809L
-#endif
-
-// On Windows: bump up max number of sockets per select() call.
-// On any system: Use this number as limit for socket strip size.
-#define FD_SETSIZE 128
-
-#ifdef _WIN32
-
-# include <winsock2.h>
-# include <ws2tcpip.h>
-
-// Winsock brings its own closesocket, INVALID_SOCKET, SOCKET_ERROR
-
-static inline int
-is_benign_error(void)
-{
-	int err = WSAGetLastError();
-	return err == WSAEINTR || err == WSAEWOULDBLOCK;
-}
-
-#else
-
-# include <sys/types.h>
-# include <sys/socket.h>
-# include <sys/select.h>
-# include <unistd.h>
-# include <fcntl.h>
-# include <netdb.h>
-# include <errno.h>
-
-// We mimic Winsock on Unixoid systems here, since it's easier than
-// the other way around.
-# define closesocket close
-# define INVALID_SOCKET -1
-# define SOCKET_ERROR -1
-
-static inline int
-is_benign_error(void)
-{
-	return errno == EINTR || errno == EWOULDBLOCK || errno == EAGAIN;
-}
-
-#endif
-
 static char *
-port2str(int port, char *buf, int max)
+rcon_port_to_string(int port, char *buf, int max)
 {
 	char *p = buf + max;
 	*--p = 0;
@@ -311,12 +321,6 @@ rcon_socket_uninit(void)
 
 /* ---- TCP Sockets ---- */
 
-struct rcon_tcp_socket {
-	int fd;
-	struct sockaddr_storage myAddr;
-	socklen_t myAddrLen;
-};
-
 static RCON_TcpSocket *
 make_tcp_socket(int fd, const void *addr, socklen_t addrLen)
 {
@@ -338,7 +342,7 @@ RCON_TcpSocket *
 rcon_tcp_listen(const char *hostname, int port)
 {
 	char portbuf[10], *portstr;
-	portstr = port2str(port, portbuf, 10);
+	portstr = rcon_port_to_string(port, portbuf, 10);
 
 	// Find contender addresses via getaddrinfo()
 	struct addrinfo *ai, hints = {
@@ -457,28 +461,14 @@ rcon_tcp_close(RCON_TcpSocket *sock)
 
 /* ---- Socket Strips ---- */
 
-struct rcon_socket_strip {
-	int fds[FD_SETSIZE];
-	fd_set rfds;
-	int count;
-};
-
-RCON_SocketStrip *
-rcon_socket_strip_alloc(void)
-{
-	RCON_SocketStrip *strip = calloc(1, sizeof *strip);
-	FD_ZERO(&strip->rfds);
-	return strip;
-}
-
 void
-rcon_socket_strip_free(RCON_SocketStrip *strip)
+rcon_socket_strip_init(RCON_SocketStrip *strip)
 {
-	free(strip);
+	FD_ZERO(&strip->rfds);
 }
 
 int
-rcon_socket_strip_check(RCON_SocketStrip *strip, unsigned timeoutMs)
+rcon_socket_strip_check(RCON_SocketStrip *strip, long timeoutMs)
 {
 	int fdlimit = 0;
 
@@ -491,13 +481,13 @@ rcon_socket_strip_check(RCON_SocketStrip *strip, unsigned timeoutMs)
 
 	// Fill out time-out struct
 	struct timeval tv;
-	tv.tv_sec  = timeoutMs / 1000;
-	tv.tv_usec = (timeoutMs % 1000) * 1000;
+	tv.tv_sec  = (unsigned long)timeoutMs / 1000;
+	tv.tv_usec = ((unsigned long)timeoutMs % 1000) * 1000;
 	
 	// Perform select() syscall
 	int s;
 	do {
-		s = select(fdlimit, &strip->rfds, NULL, NULL, &tv);
+		s = select(fdlimit, &strip->rfds, NULL, NULL, timeoutMs < 0 ? NULL : &tv);
 	} while (s < 0 && is_benign_error());
 	return s;
 }

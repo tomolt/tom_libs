@@ -31,8 +31,7 @@ main()
 
 	running = true;
 	while (running) {
-		if (rcon_socket_strip_check(rcon->strip, 1000) <= 0) continue;
-		rcon_update(rcon);
+		rcon_update(rcon, -1);
 	}
 
 	rcon_destroy(rcon);
