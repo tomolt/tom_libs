@@ -25,7 +25,7 @@ eval_command(void *userdata, const char *cmd, size_t length)
 int
 main()
 {
-	rcon_socket_init();
+	rcon_tcp_init();
 	rcon = rcon_create(NULL);
 	rcon->eval = eval_command;
 
@@ -35,6 +35,6 @@ main()
 	}
 
 	rcon_destroy(rcon);
-	rcon_socket_uninit();
+	rcon_tcp_uninit();
 	return 0;
 }
