@@ -1,9 +1,7 @@
 #ifndef _TOM_RCON_H_
 #define _TOM_RCON_H_
 
-#define RCON_MAX_IP_ADDR_SIZE 128
 #define RCON_PORT        "7023"
-#define RCON_MAX_CLIENTS 4
 #define RCON_TCP_LISTEN_BACKLOG 4
 
 typedef struct rcon Rcon;
@@ -29,7 +27,7 @@ struct rcon_io_impl {
 void rcon_tcp_init(void);
 void rcon_tcp_uninit(void);
 
-void *rcon_tcp_open(const char *hostname, const char *port);
+void *rcon_tcp_open(const char *hostname, const char *port, int maxClients);
 int  rcon_tcp_accept(void *userdata);
 int  rcon_tcp_send(void *userdata, int idx, const void *data, unsigned len);
 int  rcon_tcp_recv(void *userdata, int idx, void *data, unsigned max);
@@ -46,7 +44,7 @@ static const struct rcon_io_impl rcon_tcp_io_impl = {
 	.cb_hasdata = rcon_tcp_hasdata,
 };
 
-Rcon *rcon_create (void *userdata);
+Rcon *rcon_create (int maxClients, void *userdata);
 void  rcon_destroy(Rcon *rc);
 void  rcon_update (Rcon *rc, long timeoutMs);
 
@@ -124,22 +122,29 @@ struct rcon_client {
 };
 
 struct rcon {
-	struct rcon_client clients[RCON_MAX_CLIENTS];
+	struct rcon_client *clients;
 	char            *(*eval)(void *userdata, const char *msg, size_t len);
 	void              *userdata;
+	int                maxClients;
 
 	const struct rcon_io_impl *io;
 	void *iodata;
 };
 
 Rcon *
-rcon_create(void *userdata)
+rcon_create(int maxClients, void *userdata)
 {
 	Rcon *rc = calloc(1, sizeof *rc);
 	if (!rc) return NULL;
+	rc->maxClients = maxClients;
+	rc->clients = calloc(rc->maxClients, sizeof *rc->clients);
+	if (!rc->clients) {
+		free(rc);
+		return NULL;
+	}
 	rc->userdata = userdata;
 	rc->io = &rcon_tcp_io_impl;
-	rc->iodata = rcon_tcp_open("0.0.0.0", RCON_PORT);
+	rc->iodata = rcon_tcp_open("0.0.0.0", RCON_PORT, maxClients);
 	return rc;
 }
 
@@ -148,6 +153,7 @@ rcon_destroy(Rcon *rc)
 {
 	if (!rc) return;
 	rc->io->cb_close(rc->iodata, 0);
+	free(rc->clients);
 	free(rc);
 }
 
@@ -228,7 +234,7 @@ void
 rcon_update(Rcon *rc, long timeoutMs)
 {
 	if (rc->io->cb_waitany(rc->iodata, timeoutMs) <= 0) return;
-	for (int i = 0; i < RCON_MAX_CLIENTS; i++) {
+	for (int i = 0; i < rc->maxClients; i++) {
 		struct rcon_client *client = &rc->clients[i];
 		int cidx = i + 1;
 		if (!client->inUse) continue;
@@ -320,7 +326,7 @@ rcon_tcp_uninit(void)
 }
 
 void *
-rcon_tcp_open(const char *hostname, const char *port)
+rcon_tcp_open(const char *hostname, const char *port, int maxClients)
 {
 	// Find contender addresses via getaddrinfo()
 	struct addrinfo *ai, hints = {
@@ -372,8 +378,9 @@ rcon_tcp_open(const char *hostname, const char *port)
 
 		// Success! Construct a pollfd array and return it.
 		struct rcon_tcp_block *tcp = calloc(sizeof *tcp +
-			(1 + RCON_MAX_CLIENTS) * sizeof *tcp->pfds, 1);
-		for (int idx = 0; idx < 1+RCON_MAX_CLIENTS; idx++) {
+			(1 + maxClients) * sizeof *tcp->pfds, 1);
+		tcp->nfds = 1 + maxClients;
+		for (int idx = 0; idx < tcp->nfds; idx++) {
 			tcp->pfds[idx].fd = -1;
 			tcp->pfds[idx].events = POLLIN;
 		}
@@ -396,7 +403,7 @@ rcon_tcp_accept(void *userdata)
 		return -1;
 	}
 
-	for (idx = 1; idx < 1+RCON_MAX_CLIENTS; idx++) {
+	for (idx = 1; idx < tcp->nfds; idx++) {
 		if (tcp->pfds[idx].fd < 0) {
 			tcp->pfds[idx].fd = fd;
 			return idx;
@@ -445,7 +452,7 @@ rcon_tcp_close(void *userdata, int idx)
 {
 	struct rcon_tcp_block *tcp = userdata;
 	if (idx == 0) {
-		for (int i = 1; i < 1+RCON_MAX_CLIENTS; i++) {
+		for (int i = 1; i < tcp->nfds; i++) {
 			closesocket(tcp->pfds[i].fd);
 		}
 		closesocket(tcp->pfds[0].fd);
@@ -460,7 +467,7 @@ int
 rcon_tcp_waitany(void *userdata, long timeoutMs)
 {
 	struct rcon_tcp_block *tcp = userdata;
-	return poll(tcp->pfds, 1+RCON_MAX_CLIENTS, timeoutMs);
+	return poll(tcp->pfds, tcp->nfds, timeoutMs);
 }
 
 int

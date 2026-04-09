@@ -26,7 +26,7 @@ int
 main()
 {
 	rcon_tcp_init();
-	rcon = rcon_create(NULL);
+	rcon = rcon_create(2, NULL);
 	rcon->eval = eval_command;
 
 	running = true;
