@@ -75,8 +75,10 @@ struct rcon_client {
 	int inUse;
 	int authd;
 	int inCmd;
-	unsigned requestID;
-	unsigned char buffer[4 + 4096];
+	int packetLength;
+	int requestID;
+	int packetType;
+	char buffer[4 + 4096];
 };
 
 struct rcon {
@@ -118,6 +120,10 @@ int  rcon_create (Rcon *rc, const struct rcon_io_impl *io, void *iodata, int max
 int  rcon_create_tcp(Rcon *rc, const char *hostname, int port, int maxClients, void *userdata);
 void rcon_destroy(Rcon *rc);
 void rcon_update (Rcon *rc, long timeoutMs);
+
+int  rcon_wait_for_input(Rcon *rc, long timeoutMs);
+int  rcon_fetch_command(Rcon *rc, const char **commandPtr);
+int  rcon_complete_command(Rcon *rc, int clientIdx);
 
 /* Sets the server password.
  * The password is not copied and stored, RCON only stores the pointer that you pass in.
@@ -288,7 +294,7 @@ rcon_destroy(Rcon *rc)
 }
 
 static inline void
-rcon_write_i32(unsigned char *b, int32_t v)
+rcon_write_i32(char *b, int32_t v)
 {
 	b[0] = v;
 	b[1] = v >> 8;
@@ -297,16 +303,16 @@ rcon_write_i32(unsigned char *b, int32_t v)
 }
 
 static inline int32_t
-rcon_read_i32(const unsigned char *b)
+rcon_read_i32(const char *b)
 {
 	return (int32_t)b[0] | (int32_t)b[1] << 8 |
 		(int32_t)b[2] << 16 | (int32_t)b[3] << 24;
 }
 
 static void
-rcon_send(Rcon *rc, int cidx, int32_t rid, int32_t type, const unsigned char *payload, int length)
+rcon_send(Rcon *rc, int cidx, int32_t rid, int32_t type, const char *payload, int length)
 {
-	unsigned char packet[4+4096];
+	char packet[4+4096];
 	do {
 		// Split into fragments
 		int fragPayLen = RCON_MIN(4096 - 10, length);
@@ -323,7 +329,7 @@ rcon_send(Rcon *rc, int cidx, int32_t rid, int32_t type, const unsigned char *pa
 }
 
 static int
-rcon_process(Rcon *rc, int cidx, int pktLen, unsigned char *packet)
+rcon_process(Rcon *rc, int cidx, int pktLen, char *packet)
 {
 	if (pktLen < 10) return -1;
 	int32_t rid = rcon_read_i32(packet);
@@ -349,17 +355,15 @@ rcon_process(Rcon *rc, int cidx, int pktLen, unsigned char *packet)
 			// TODO check auth
 			char *result = rc->eval(rc->userdata, payload, payLen);
 			rcon_send(rc, cidx, rid, RCON_SERVERDATA_RESPONSE_VALUE,
-				(const unsigned char *)result, (int)strlen(result));
+				(const char *)result, (int)strlen(result));
 			free(result);
 		}
 		break;
 
 	default:
 		// Try to emulate weird SRCDS behaviour
-		rcon_send(rc, cidx, rid, RCON_SERVERDATA_RESPONSE_VALUE,
-				(const unsigned char *)payload, payLen);
-		rcon_send(rc, cidx, rid, RCON_SERVERDATA_RESPONSE_VALUE,
-				(const unsigned char *)"\1\0", 2);
+		rcon_send(rc, cidx, rid, RCON_SERVERDATA_RESPONSE_VALUE, payload, payLen);
+		rcon_send(rc, cidx, rid, RCON_SERVERDATA_RESPONSE_VALUE, "\1\0", 2);
 		break;
 	}
 	return 0;
@@ -465,71 +469,70 @@ rcon_wait_for_input(Rcon *rc, long timeoutMs)
 	return 0;
 }
 
-#if 0
 int
-rcon_fetch_command(Rcon *rc, char **commandPtr)
+rcon_fetch_command(Rcon *rc, const char **commandPtr)
 {
 	for (int i = 0; i < rc->maxClients; i++) {
 		struct rcon_client *client = &rc->clients[i];
 		int cidx = i + 1;
 		if (!client->inUse) continue;
+		if (client->inCmd) continue;
 		for (;;) {
 			if (client->recvd < 4) break;
-			int pktLen = rcon_read_i32(client->buffer);
-			if (client->recvd < 4 + pktLen) break;
-			if (pktLen < 10) return -1;
-			int32_t rid = rcon_read_i32(packet);
-			int32_t type = rcon_read_i32(packet + 4);
-			char *payload = (char *)(packet + 8);
-			int payLen = pktLen - 10;
+			client->packetLength = 4 + rcon_read_i32(client->buffer);
+			if (client->recvd < client->packetLength) break;
+			if (client->packetLength < 10) {
+				return RCON_BOX_ERROR(RCON_ERRSRC_PROTO, 1); // TODO
+			}
+			client->requestID = rcon_read_i32(client->buffer + 4);
+			client->packetType = rcon_read_i32(client->buffer + 8);
 			// FIXME make sure that payload is NUL-terminated!
-			switch (type) {
+			switch (client->packetType) {
 			case RCON_SERVERDATA_AUTH:
-				{
-					// Weird nonsensical packet that is sent by SRCDS
-					rcon_send(rc, cidx, rid, RCON_SERVERDATA_RESPONSE_VALUE, NULL, 0);
-
-					int matches = rcon_streq_consttime(payload, rc->password);
-					rcon_send(rc, cidx, matches ? rid : -1,
-							RCON_SERVERDATA_AUTH_RESPONSE, NULL, 0);
-					if (matches) {
-						client->authd = 1;
-					}
+				// Weird nonsensical packet that is sent by SRCDS
+				rcon_send(rc, cidx, client->requestID, RCON_SERVERDATA_RESPONSE_VALUE, NULL, 0);
+				if (rcon_streq_consttime(client->buffer + 12, rc->password)) {
+					client->authd = 1;
+					rcon_send(rc, cidx, client->requestID, RCON_SERVERDATA_AUTH_RESPONSE, NULL, 0);
+				} else {
+					rcon_send(rc, cidx, -1, RCON_SERVERDATA_AUTH_RESPONSE, NULL, 0);
 				}
 				break;
 
 			case RCON_SERVERDATA_EXECCOMMAND:
-				if (client->authd) {
-					client->inCmd = 1;
-					*commandPtr = payload;
-					return cidx;
-				} else {
-					// TODO
-					break;
+				if (!client->authd) {
+					return RCON_BOX_ERROR(RCON_ERRSRC_PROTO, 1); // TODO
 				}
+				client->inCmd = 1;
+				*commandPtr = client->buffer + 12;
+				return cidx;
 
 			default:
 				// Try to emulate weird SRCDS behaviour
-				rcon_send(rc, cidx, rid, RCON_SERVERDATA_RESPONSE_VALUE,
-						(const unsigned char *)payload, payLen);
-				rcon_send(rc, cidx, rid, RCON_SERVERDATA_RESPONSE_VALUE,
-						(const unsigned char *)"\1\0", 2);
+				rcon_send(rc, cidx, client->requestID, RCON_SERVERDATA_RESPONSE_VALUE, client->buffer + 12, client->packetLength - 14);
+				rcon_send(rc, cidx, client->requestID, RCON_SERVERDATA_RESPONSE_VALUE, "\1\0", 2);
 				break;
 			}
 		}
 	}
+	*commandPtr = NULL;
+	return 0;
 }
 
 int
 rcon_complete_command(Rcon *rc, int clientIdx)
 {
-	struct rcon_client *client = &rc->clients[clientIdx];
-	int cidx = i + 1;
-	if (!client->inUse) continue;
-	client->recvd -= 4 + pktLen;
-	memmove(client->buffer, client->buffer + 4 + pktLen, client->recvd);
+	if (clientIdx <= 0) return 0;
+	struct rcon_client *client = &rc->clients[clientIdx - 1];
+	if (!client->inUse) return 0; // TODO
+	if (!client->inCmd) {
+		return RCON_BOX_ERROR(RCON_ERRSRC_PROTO, 1); // TODO
+	}
+	client->recvd -= client->packetLength;
+	memmove(client->buffer, client->buffer + client->packetLength, client->recvd);
+	client->inCmd = 0;
+	return 0;
 }
-#endif
 
 int
 rcon_set_password(Rcon *rc, const char *password)
