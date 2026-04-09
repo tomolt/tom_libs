@@ -44,6 +44,11 @@
 #define RCON_TCP_LISTEN_BACKLOG  4
 #define RCON_MAX_PASSWORD_LENGTH 4086
 
+#define RCON_ERROR_WSAVER 1
+#define RCON_ERROR_ALLOC 2
+#define RCON_ERROR_NOBIND 3
+#define RCON_ERROR_FULL 4
+
 /* 'idx' refers to the index of the open connection.
  * They are numbered starting from 1;
  * Number 0 refers to the listener socket.
@@ -69,6 +74,8 @@ struct rcon_client {
 	int recvd;
 	int inUse;
 	int authd;
+	int inCmd;
+	unsigned requestID;
 	unsigned char buffer[4 + 4096];
 };
 
@@ -84,7 +91,7 @@ struct rcon {
 	void *iodata;
 };
 
-void rcon_tcp_init(void);
+int  rcon_tcp_init(void);
 void rcon_tcp_uninit(void);
 int  rcon_tcp_open(const char *hostname, int port, int maxClients, void **userdata);
 int  rcon_tcp_accept(void *userdata);
@@ -151,19 +158,15 @@ int  rcon_set_password(Rcon *rc, const char *password);
 # include <winsock2.h>
 # include <ws2tcpip.h>
 
-// Winsock brings its own closesocket, INVALID_SOCKET, SOCKET_ERROR
+#define RCON_INVALID_SOCKET INVALID_SOCKET
+#define rcon_closesocket    closesocket
+#define rcon_poll           WSAPoll
+#define rcon_getlasterror   WSAGetLastError
 
 static inline int
-is_benign_error(void)
+rcon_is_benign_error(int code)
 {
-	int err = WSAGetLastError();
-	return err == WSAEINTR || err == WSAEWOULDBLOCK;
-}
-
-static inline int
-get_last_error(void)
-{
-	return WSAGetLastError();
+	return code == WSAEINTR || code == WSAEWOULDBLOCK;
 }
 
 #else
@@ -177,22 +180,17 @@ get_last_error(void)
 # include <poll.h>
 # include <errno.h>
 
-// We mimic Winsock on Unixoid systems here, since it's easier than
-// the other way around.
-# define closesocket close
-# define INVALID_SOCKET -1
-# define SOCKET_ERROR -1
+// We mimic Winsock on Unixoid systems here,
+// since it's easier than the other way around.
+#define RCON_INVALID_SOCKET -1
+#define rcon_closesocket    close
+#define rcon_poll           poll
+#define rcon_getlasterror() errno
 
 static inline int
-is_benign_error(void)
+rcon_is_benign_error(int code)
 {
-	return errno == EINTR || errno == EWOULDBLOCK || errno == EAGAIN;
-}
-
-static inline int
-get_last_error(void)
-{
-	return errno;
+	return code == EINTR || code == EWOULDBLOCK || code == EAGAIN;
 }
 
 #endif
@@ -202,9 +200,6 @@ get_last_error(void)
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
-
-#define rcon_warn(...) printf(__VA_ARGS__)
-#define rcon_log(...) printf(__VA_ARGS__)
 
 #define RCON_MIN(a,b) ((a)<(b)?(a):(b))
 #define RCON_MAX(a,b) ((a)>(b)?(a):(b))
@@ -387,7 +382,6 @@ rcon_update(Rcon *rc, long timeoutMs)
 		if (got == 0) {
 			drop = 1;
 		} else if (got < 0) {
-			rcon_warn("TCP socket error");
 			drop = 1;
 		} else {
 			client->recvd += got;
@@ -404,21 +398,138 @@ rcon_update(Rcon *rc, long timeoutMs)
 			}
 		}
 		if (drop) {
-			rcon_log("Dropping RCON client.");
 			rc->io->cb_close(rc->iodata, cidx);
 			client->inUse = 0;
 		}
 	}
 	if (rc->io->cb_hasdata(rc->iodata, 0)) {
 		int newidx = rc->io->cb_accept(rc->iodata);
-		if (newidx) {
+		if (newidx > 0) {
 			int i = newidx - 1;
-			rcon_log("Got a new RCON client.");
 			rc->clients[i].recvd = 0;
 			rc->clients[i].inUse = 1;
 		}
 	}
 }
+
+void
+rcon_drop_client(Rcon *rc, int i)
+{
+	struct rcon_client *client = &rc->clients[i];
+	int cidx = i + 1;
+	rc->io->cb_close(rc->iodata, cidx);
+	client->inUse = 0;
+}
+
+int
+rcon_wait_for_input(Rcon *rc, long timeoutMs)
+{
+	int s;
+
+	s = rc->io->cb_waitany(rc->iodata, timeoutMs);
+	if (s <= 0) return s;
+
+	for (int i = 0; i < rc->maxClients; i++) {
+		struct rcon_client *client = &rc->clients[i];
+		int cidx = i + 1;
+		if (!client->inUse) continue;
+		if (!rc->io->cb_hasdata(rc->iodata, cidx)) continue;
+
+		s = rc->io->cb_recv(rc->iodata, cidx,
+			client->buffer + client->recvd,
+			sizeof client->buffer - client->recvd);
+		if (s < 0) {
+			rcon_drop_client(rc, i);
+			return s;
+		} else if (s == 0) {
+			rcon_drop_client(rc, i);
+		} else {
+			client->recvd += s;
+		}
+	}
+
+	if (rc->io->cb_hasdata(rc->iodata, 0)) {
+		int newidx = rc->io->cb_accept(rc->iodata);
+		if (newidx < 0) {
+			return newidx;
+		}
+		if (newidx > 0) {
+			int i = newidx - 1;
+			rc->clients[i].recvd = 0;
+			rc->clients[i].inUse = 1;
+			rc->clients[i].authd = 0;
+			rc->clients[i].inCmd = 0;
+		}
+	}
+
+	return 0;
+}
+
+#if 0
+int
+rcon_fetch_command(Rcon *rc, char **commandPtr)
+{
+	for (int i = 0; i < rc->maxClients; i++) {
+		struct rcon_client *client = &rc->clients[i];
+		int cidx = i + 1;
+		if (!client->inUse) continue;
+		for (;;) {
+			if (client->recvd < 4) break;
+			int pktLen = rcon_read_i32(client->buffer);
+			if (client->recvd < 4 + pktLen) break;
+			if (pktLen < 10) return -1;
+			int32_t rid = rcon_read_i32(packet);
+			int32_t type = rcon_read_i32(packet + 4);
+			char *payload = (char *)(packet + 8);
+			int payLen = pktLen - 10;
+			// FIXME make sure that payload is NUL-terminated!
+			switch (type) {
+			case RCON_SERVERDATA_AUTH:
+				{
+					// Weird nonsensical packet that is sent by SRCDS
+					rcon_send(rc, cidx, rid, RCON_SERVERDATA_RESPONSE_VALUE, NULL, 0);
+
+					int matches = rcon_streq_consttime(payload, rc->password);
+					rcon_send(rc, cidx, matches ? rid : -1,
+							RCON_SERVERDATA_AUTH_RESPONSE, NULL, 0);
+					if (matches) {
+						client->authd = 1;
+					}
+				}
+				break;
+
+			case RCON_SERVERDATA_EXECCOMMAND:
+				if (client->authd) {
+					client->inCmd = 1;
+					*commandPtr = payload;
+					return cidx;
+				} else {
+					// TODO
+					break;
+				}
+
+			default:
+				// Try to emulate weird SRCDS behaviour
+				rcon_send(rc, cidx, rid, RCON_SERVERDATA_RESPONSE_VALUE,
+						(const unsigned char *)payload, payLen);
+				rcon_send(rc, cidx, rid, RCON_SERVERDATA_RESPONSE_VALUE,
+						(const unsigned char *)"\1\0", 2);
+				break;
+			}
+		}
+	}
+}
+
+int
+rcon_complete_command(Rcon *rc, int clientIdx)
+{
+	struct rcon_client *client = &rc->clients[clientIdx];
+	int cidx = i + 1;
+	if (!client->inUse) continue;
+	client->recvd -= 4 + pktLen;
+	memmove(client->buffer, client->buffer + 4 + pktLen, client->recvd);
+}
+#endif
 
 int
 rcon_set_password(Rcon *rc, const char *password)
@@ -464,21 +575,23 @@ struct rcon_tcp_block {
 	struct pollfd pfds[];
 };
 
-void
+int
 rcon_tcp_init(void)
 {
 #ifdef _WIN32
+	int s;
 	WSADATA wsaData;
 	// Most recent version of Winsock at time of writing
-	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-		rcon_warn("Unable to initialize Winsock library.");
-		return;
+	s = WSAStartup(MAKEWORD(2, 2), &wsaData);
+	if (s != 0) {
+		return RCON_BOX_ERROR(RCON_ERRSRC_SYSTEM, s);
 	}
 	if (LOBYTE(wsaData.wVersion) != 2 || HIBYTE(wsaData.wVersion) != 2) {
-		rcon_warn("Version 2.2 of Winsock is not available.");
 		WSACleanup();
-		return;
+		return RCON_BOX_ERROR(RCON_ERRSRC_PROTO, 1); // TODO
 	}
+#else
+	return 0;
 #endif
 }
 
@@ -509,7 +622,7 @@ rcon_tcp_open(const char *hostname, int port, int maxClients, void **userdata)
 #ifdef _WIN32
 		// gai_strerror() is not thread-safe on Windows.
 		// WSAGetLastError() can be used instead.
-		return RCON_BOX_ERROR(RCON_ERRSRC_SYSTEM, get_last_error());
+		return RCON_BOX_ERROR(RCON_ERRSRC_SYSTEM, rcon_getlasterror());
 #else
 		return RCON_BOX_ERROR(RCON_ERRSRC_GAI, -s);
 #endif
@@ -520,7 +633,7 @@ rcon_tcp_open(const char *hostname, int port, int maxClients, void **userdata)
 	for (p = ai; p; p = p->ai_next) {
 		// Create socket file descriptor
 		int fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-		if (fd == INVALID_SOCKET) continue;
+		if (fd == (int)RCON_INVALID_SOCKET) continue;
 
 		// Re-use address
 #ifndef _WIN32
@@ -529,14 +642,14 @@ rcon_tcp_open(const char *hostname, int port, int maxClients, void **userdata)
 #endif
 		
 		// Bind to the address
-		if (bind(fd, p->ai_addr, p->ai_addrlen) == SOCKET_ERROR) {
-			closesocket(fd);
+		if (bind(fd, p->ai_addr, p->ai_addrlen) < 0) {
+			rcon_closesocket(fd);
 			continue;
 		}
 
 		// Listen for incoming connections
-		if (listen(fd, RCON_TCP_LISTEN_BACKLOG) == SOCKET_ERROR) {
-			closesocket(fd);
+		if (listen(fd, RCON_TCP_LISTEN_BACKLOG) < 0) {
+			rcon_closesocket(fd);
 			continue;
 		}
 
@@ -576,7 +689,9 @@ rcon_tcp_accept(void *userdata)
 
 	fd = accept(tcp->pfds[0].fd, NULL, NULL);
 	if (fd < 0) {
-		return RCON_BOX_ERROR(RCON_ERRSRC_SYSTEM, get_last_error());
+		int code = rcon_getlasterror();
+		if (rcon_is_benign_error(code)) return 0;
+		else return RCON_BOX_ERROR(RCON_ERRSRC_SYSTEM, code);
 	}
 
 	for (idx = 1; idx < tcp->nfds; idx++) {
@@ -586,7 +701,7 @@ rcon_tcp_accept(void *userdata)
 		}
 	}
 	
-	closesocket(fd);
+	rcon_closesocket(fd);
 	return RCON_BOX_ERROR(RCON_ERRSRC_PROTO, 1); // TODO
 }
 
@@ -599,9 +714,10 @@ rcon_tcp_send(void *userdata, int idx, const void *data, unsigned len)
 	unsigned sent = 0;
 	while (sent < len) {
 		int s = (int)send(fd, uchars + sent, len - sent, 0);
-		if (s == SOCKET_ERROR) {
-			if (is_benign_error()) continue;
-			else return RCON_BOX_ERROR(RCON_ERRSRC_SYSTEM, get_last_error());
+		if (s < 0) {
+			int code = rcon_getlasterror();
+			if (rcon_is_benign_error(code)) continue;
+			else return RCON_BOX_ERROR(RCON_ERRSRC_SYSTEM, code);
 		}
 		sent += s;
 	}
@@ -615,9 +731,10 @@ rcon_tcp_recv(void *userdata, int idx, void *data, unsigned max)
 	int fd = tcp->pfds[idx].fd;
 	for (;;) {
 		int s = (int)recv(fd, data, max, 0);
-		if (s == SOCKET_ERROR) {
-			if (is_benign_error()) continue;
-			else return RCON_BOX_ERROR(RCON_ERRSRC_SYSTEM, get_last_error());
+		if (s < 0) {
+			int code = rcon_getlasterror();
+			if (rcon_is_benign_error(code)) continue;
+			else return RCON_BOX_ERROR(RCON_ERRSRC_SYSTEM, code);
 		}
 		return s;
 	}
@@ -629,12 +746,12 @@ rcon_tcp_close(void *userdata, int idx)
 	struct rcon_tcp_block *tcp = userdata;
 	if (idx == 0) {
 		for (int i = 1; i < tcp->nfds; i++) {
-			closesocket(tcp->pfds[i].fd);
+			rcon_closesocket(tcp->pfds[i].fd);
 		}
-		closesocket(tcp->pfds[0].fd);
+		rcon_closesocket(tcp->pfds[0].fd);
 		free(tcp);
 	} else {
-		closesocket(tcp->pfds[idx].fd);
+		rcon_closesocket(tcp->pfds[idx].fd);
 		tcp->pfds[idx].fd = -1;
 	}
 }
@@ -643,9 +760,9 @@ int
 rcon_tcp_waitany(void *userdata, long timeoutMs)
 {
 	struct rcon_tcp_block *tcp = userdata;
-	int n = poll(tcp->pfds, tcp->nfds, timeoutMs);
+	int n = rcon_poll(tcp->pfds, tcp->nfds, timeoutMs);
 	if (n < 0) {
-		return RCON_BOX_ERROR(RCON_ERRSRC_SYSTEM, get_last_error());
+		return RCON_BOX_ERROR(RCON_ERRSRC_SYSTEM, rcon_getlasterror());
 	} else {
 		return n;
 	}
@@ -668,8 +785,12 @@ rcon_tcp_strerror(void *userdata, int err, char *buf, unsigned max)
 	int code = (-err) >> RCON_ERROR_CODE_SHIFT;
 	switch (src) {
 	case RCON_ERRSRC_SYSTEM:
+#ifdef _WIN32
+		strerror_s(buf, max, code);
+#else
 		// Assuming XSI-compliant strerror_r()
 		strerror_r(code, buf, max);
+#endif
 		break;
 	case RCON_ERRSRC_GAI:
 		p = gai_strerror(-code);
