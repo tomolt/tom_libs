@@ -84,7 +84,6 @@ struct rcon_client {
 struct rcon {
 	struct rcon_client *clients;
 
-	char     *(*eval)(void *userdata, const char *msg, size_t len);
 	void       *userdata;
 	int         maxClients;
 	const char *password;
@@ -119,11 +118,10 @@ void rcon_strerror(Rcon *rc, int err, char *buf, unsigned max);
 int  rcon_create (Rcon *rc, const struct rcon_io_impl *io, void *iodata, int maxClients, void *userdata);
 int  rcon_create_tcp(Rcon *rc, const char *hostname, int port, int maxClients, void *userdata);
 void rcon_destroy(Rcon *rc);
-void rcon_update (Rcon *rc, long timeoutMs);
 
 int  rcon_wait_for_input(Rcon *rc, long timeoutMs);
 int  rcon_fetch_command(Rcon *rc, const char **commandPtr);
-int  rcon_complete_command(Rcon *rc, int clientIdx);
+int  rcon_complete_command(Rcon *rc, int clientIdx, const char *response);
 
 /* Sets the server password.
  * The password is not copied and stored, RCON only stores the pointer that you pass in.
@@ -328,94 +326,6 @@ rcon_send(Rcon *rc, int cidx, int32_t rid, int32_t type, const char *payload, in
 	} while (length);
 }
 
-static int
-rcon_process(Rcon *rc, int cidx, int pktLen, char *packet)
-{
-	if (pktLen < 10) return -1;
-	int32_t rid = rcon_read_i32(packet);
-	int32_t type = rcon_read_i32(packet + 4);
-	char *payload = (char *)(packet + 8);
-	int payLen = pktLen - 10;
-	// FIXME make sure that payload is NUL-terminated!
-	switch (type) {
-	case RCON_SERVERDATA_AUTH:
-		{
-			// Weird nonsensical packet that is sent by SRCDS
-			rcon_send(rc, cidx, rid, RCON_SERVERDATA_RESPONSE_VALUE, NULL, 0);
-
-			int matches = rcon_streq_consttime(payload, rc->password);
-			rcon_send(rc, cidx, matches ? rid : -1,
-				RCON_SERVERDATA_AUTH_RESPONSE, NULL, 0);
-			// TODO store auth
-		}
-		break;
-
-	case RCON_SERVERDATA_EXECCOMMAND:
-		{
-			// TODO check auth
-			char *result = rc->eval(rc->userdata, payload, payLen);
-			rcon_send(rc, cidx, rid, RCON_SERVERDATA_RESPONSE_VALUE,
-				(const char *)result, (int)strlen(result));
-			free(result);
-		}
-		break;
-
-	default:
-		// Try to emulate weird SRCDS behaviour
-		rcon_send(rc, cidx, rid, RCON_SERVERDATA_RESPONSE_VALUE, payload, payLen);
-		rcon_send(rc, cidx, rid, RCON_SERVERDATA_RESPONSE_VALUE, "\1\0", 2);
-		break;
-	}
-	return 0;
-}
-
-void
-rcon_update(Rcon *rc, long timeoutMs)
-{
-	if (rc->io->cb_waitany(rc->iodata, timeoutMs) <= 0) return;
-	for (int i = 0; i < rc->maxClients; i++) {
-		struct rcon_client *client = &rc->clients[i];
-		int cidx = i + 1;
-		if (!client->inUse) continue;
-		if (!rc->io->cb_hasdata(rc->iodata, cidx)) continue;
-		int drop = 0;
-		// TODO proper handling of huge input
-		int got = rc->io->cb_recv(rc->iodata, cidx,
-			client->buffer + client->recvd,
-			sizeof client->buffer - client->recvd);
-		if (got == 0) {
-			drop = 1;
-		} else if (got < 0) {
-			drop = 1;
-		} else {
-			client->recvd += got;
-			for (;;) {
-				if (client->recvd < 4) break;
-				int pktLen = rcon_read_i32(client->buffer);
-				if (client->recvd < 4 + pktLen) break;
-				if (rcon_process(rc, cidx, pktLen, client->buffer + 4) < 0) {
-					drop = 1;
-					break;
-				}
-				client->recvd -= 4 + pktLen;
-				memmove(client->buffer, client->buffer + 4 + pktLen, client->recvd);
-			}
-		}
-		if (drop) {
-			rc->io->cb_close(rc->iodata, cidx);
-			client->inUse = 0;
-		}
-	}
-	if (rc->io->cb_hasdata(rc->iodata, 0)) {
-		int newidx = rc->io->cb_accept(rc->iodata);
-		if (newidx > 0) {
-			int i = newidx - 1;
-			rc->clients[i].recvd = 0;
-			rc->clients[i].inUse = 1;
-		}
-	}
-}
-
 void
 rcon_drop_client(Rcon *rc, int i)
 {
@@ -513,6 +423,8 @@ rcon_fetch_command(Rcon *rc, const char **commandPtr)
 				rcon_send(rc, cidx, client->requestID, RCON_SERVERDATA_RESPONSE_VALUE, "\1\0", 2);
 				break;
 			}
+			client->recvd -= client->packetLength;
+			memmove(client->buffer, client->buffer + client->packetLength, client->recvd);
 		}
 	}
 	*commandPtr = NULL;
@@ -520,7 +432,7 @@ rcon_fetch_command(Rcon *rc, const char **commandPtr)
 }
 
 int
-rcon_complete_command(Rcon *rc, int clientIdx)
+rcon_complete_command(Rcon *rc, int clientIdx, const char *response)
 {
 	if (clientIdx <= 0) return 0;
 	struct rcon_client *client = &rc->clients[clientIdx - 1];
@@ -528,6 +440,7 @@ rcon_complete_command(Rcon *rc, int clientIdx)
 	if (!client->inCmd) {
 		return RCON_BOX_ERROR(RCON_ERRSRC_PROTO, 1); // TODO
 	}
+	rcon_send(rc, clientIdx, client->requestID, RCON_SERVERDATA_RESPONSE_VALUE, response, strlen(response));
 	client->recvd -= client->packetLength;
 	memmove(client->buffer, client->buffer + client->packetLength, client->recvd);
 	client->inCmd = 0;
