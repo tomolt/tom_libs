@@ -41,7 +41,6 @@
 
 #include <stddef.h>
 
-#define RCON_PORT                "7023"
 #define RCON_TCP_LISTEN_BACKLOG  4
 #define RCON_MAX_PASSWORD_LENGTH 4086
 
@@ -87,7 +86,7 @@ struct rcon {
 
 void rcon_tcp_init(void);
 void rcon_tcp_uninit(void);
-int  rcon_tcp_open(const char *hostname, const char *port, int maxClients, void **userdata);
+int  rcon_tcp_open(const char *hostname, int port, int maxClients, void **userdata);
 int  rcon_tcp_accept(void *userdata);
 int  rcon_tcp_send(void *userdata, int idx, const void *data, unsigned len);
 int  rcon_tcp_recv(void *userdata, int idx, void *data, unsigned max);
@@ -286,20 +285,6 @@ rcon_create(Rcon *rc, const struct rcon_io_impl *io, void *iodata, int maxClient
 	return 0;
 }
 
-int
-rcon_create_tcp(Rcon *rc, const char *hostname, int port, int maxClients, void *userdata)
-{
-	void *iodata;
-	int s;
-	s = rcon_tcp_open(hostname, RCON_PORT, maxClients, &iodata);
-	if (s < 0) return s;
-	s = rcon_create(rc, &rcon_tcp_io_impl, iodata, maxClients, userdata);
-	if (s < 0) {
-		rcon_tcp_io_impl.cb_close(iodata, 0);
-	}
-	return s;
-}
-
 void
 rcon_destroy(Rcon *rc)
 {
@@ -458,7 +443,21 @@ rcon_port_to_string(int port, char *buf, int max)
 	return p;
 }
 
-/* ---- Global Initialization (Windows only) ---- */
+/* ---- TCP ---- */
+
+int
+rcon_create_tcp(Rcon *rc, const char *hostname, int port, int maxClients, void *userdata)
+{
+	void *iodata;
+	int s;
+	s = rcon_tcp_open(hostname, port, maxClients, &iodata);
+	if (s < 0) return s;
+	s = rcon_create(rc, &rcon_tcp_io_impl, iodata, maxClients, userdata);
+	if (s < 0) {
+		rcon_tcp_io_impl.cb_close(iodata, 0);
+	}
+	return s;
+}
 
 struct rcon_tcp_block {
 	int nfds;
@@ -492,15 +491,20 @@ rcon_tcp_uninit(void)
 }
 
 int
-rcon_tcp_open(const char *hostname, const char *port, int maxClients, void **userdata)
+rcon_tcp_open(const char *hostname, int port, int maxClients, void **userdata)
 {
+	char portBuf[6]; // Highest Port No: 65535 ~> 5 digits + 1 NUL
+	char *portStr;
+
+	portStr = rcon_port_to_string(port & 0xFFFF, portBuf, sizeof portBuf);
+
 	// Find contender addresses via getaddrinfo()
 	struct addrinfo *ai, hints = {
 		.ai_flags    = AI_NUMERICSERV | AI_PASSIVE,
 		.ai_family   = AF_UNSPEC,
 		.ai_socktype = SOCK_STREAM,
 	};
-	int s = getaddrinfo(hostname, port, &hints, &ai);
+	int s = getaddrinfo(hostname, portStr, &hints, &ai);
 	if (s) {
 #ifdef _WIN32
 		// gai_strerror() is not thread-safe on Windows.
