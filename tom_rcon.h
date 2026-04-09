@@ -1,8 +1,47 @@
+/* tom_rcon.h: Single-header, minimal dependencies RCON server implementation
+ *
+ * Copyright (C) 2026 Thomas Oltmann
+ *
+ * WHY USE THE RCON PROTOCOL?
+ *
+ * RCON has become a de-facto standard in the video games industry.
+ * It is found in such disparate titles as Minecraft, Team Fortress 2 (Source Engine),
+ * Ark: Survival Evolved (Unreal Engine 4), and Palworld (Unity Engine).
+ * Consequently, there is a large amount of software tooling readily available,
+ * and many end users are already familiar with the concept.
+ *
+ * Notably, that is the full extent of RCONs advantages as a protocol.
+ * It is an ill-designed network protocol in most aspects.
+ * Passwords are transmitted over the network in plain text.
+ * RCON client programs have to exploit unintended behaviour of the original
+ * RCON implementation in the Source Dedicated Server (SRCDS) to function properly.
+ *
+ * FEATURES
+ *
+ * - Supports multiple active connections
+ * - The password is checked using a constant-time string comparison algorithm
+ * - I/O abstraction layer allows you to transport RCON over protocols other than TCP
+ *
+ * DEPENDENCIES
+ *
+ * string.h: strlen(), memcpy()
+ *
+ * If you did not disable the platform abstraction layer for TCP sockets,
+ * then this library will additionally depend on
+ * Winsock2 on Microsoft Windows systems, or
+ * POSIX.1-2008 interfaces on Unixoid systems.
+ *
+ * THREAD SAFETY
+ *
+ * This library performs no multithreading or locking.
+ *
+ */
 #ifndef _TOM_RCON_H_
 #define _TOM_RCON_H_
 
-#define RCON_PORT        "7023"
-#define RCON_TCP_LISTEN_BACKLOG 4
+#define RCON_PORT                "7023"
+#define RCON_TCP_LISTEN_BACKLOG  4
+#define RCON_MAX_PASSWORD_LENGTH 4086
 
 typedef struct rcon Rcon;
 
@@ -22,6 +61,7 @@ struct rcon_io_impl {
 	void (*cb_close)(void *, int);
 	int  (*cb_waitany)(void *, long);
 	int  (*cb_hasdata)(void *, int);
+	void (*cb_strerror)(void *, int, char *, unsigned);
 };
 
 void rcon_tcp_init(void);
@@ -34,30 +74,57 @@ int  rcon_tcp_recv(void *userdata, int idx, void *data, unsigned max);
 void rcon_tcp_close(void *userdata, int idx);
 int  rcon_tcp_waitany(void *userdata, long timeoutMs);
 int  rcon_tcp_hasdata(void *userdata, int idx);
+void rcon_tcp_strerror(void *userdata, int err, char *buf, unsigned max);
 
 static const struct rcon_io_impl rcon_tcp_io_impl = {
-	.cb_accept  = rcon_tcp_accept,
-	.cb_send    = rcon_tcp_send,
-	.cb_recv    = rcon_tcp_recv,
-	.cb_close   = rcon_tcp_close,
-	.cb_waitany = rcon_tcp_waitany,
-	.cb_hasdata = rcon_tcp_hasdata,
+	.cb_accept   = rcon_tcp_accept,
+	.cb_send     = rcon_tcp_send,
+	.cb_recv     = rcon_tcp_recv,
+	.cb_close    = rcon_tcp_close,
+	.cb_waitany  = rcon_tcp_waitany,
+	.cb_hasdata  = rcon_tcp_hasdata,
+	.cb_strerror = rcon_tcp_strerror,
 };
+
+void  rcon_strerror(Rcon *rc, int err, char *buf, unsigned max);
 
 Rcon *rcon_create (int maxClients, void *userdata);
 void  rcon_destroy(Rcon *rc);
 void  rcon_update (Rcon *rc, long timeoutMs);
 
+/* Sets the server password.
+ * The password is not copied and stored, RCON only stores the pointer that you pass in.
+ * It is your responsibility to make sure that it is not free'd prematurely.
+ * A password of NULL results in RCON not accepting any new authentication requests.
+ * If the argument string is too long to be used as a password, 0 is returned,
+ * and internally the password is set to NULL (meaning no authentication succeeds).
+ * Returns 1 on success.
+ */
+int   rcon_set_password(Rcon *rc, const char *password);
+
 #ifdef RCON_IMPLEMENTATION
+
+/* There's multiple different error sources at play, each with their own
+ * conventions for error numbers. Luckily, they are all just integers.
+ * We can represent any error code in a unified way by 'boxing' them in a larger error code.
+ * Boxed error codes are always negative values.
+ */
+
+// Errors related to the RCON protocol
+#define RCON_ERRSRC_PROTO  0
+// Errors reported by system APIs (errno or WSAGetLastError())
+#define RCON_ERRSRC_SYSTEM 1
+// Errors stemming from getaddrinfo()
+#define RCON_ERRSRC_GAI    2
+
+#define RCON_ERROR_CODE_SHIFT  2
+#define RCON_ERROR_SOURCE_MASK ((1u<<RCON_ERROR_CODE_SHIFT)-1)
+#define RCON_BOX_ERROR(src, code) (-(((code)<<RCON_ERROR_CODE_SHIFT)|(src)))
 
 // On Unixoid systems, we need POSIX-specific interfaces that won't be visible normally.
 #ifndef _WIN32
 # define _POSIX_C_SOURCE 200809L
 #endif
-
-// On Windows: bump up max number of sockets per select() call.
-// On any system: Use this number as limit for socket strip size.
-#define FD_SETSIZE 128
 
 #ifdef _WIN32
 
@@ -71,6 +138,12 @@ is_benign_error(void)
 {
 	int err = WSAGetLastError();
 	return err == WSAEINTR || err == WSAEWOULDBLOCK;
+}
+
+static inline int
+get_last_error(void)
+{
+	return WSAGetLastError();
 }
 
 #else
@@ -96,6 +169,12 @@ is_benign_error(void)
 	return errno == EINTR || errno == EWOULDBLOCK || errno == EAGAIN;
 }
 
+static inline int
+get_last_error(void)
+{
+	return errno;
+}
+
 #endif
 
 #include <stdint.h>
@@ -118,6 +197,7 @@ is_benign_error(void)
 struct rcon_client {
 	int recvd;
 	int inUse;
+	int authd;
 	unsigned char buffer[4 + 4096];
 };
 
@@ -126,10 +206,65 @@ struct rcon {
 	char            *(*eval)(void *userdata, const char *msg, size_t len);
 	void              *userdata;
 	int                maxClients;
+	const char        *password;
 
 	const struct rcon_io_impl *io;
 	void *iodata;
 };
+
+/* Compare a given string with a secret string,
+ * without leaking through timings how close the match is,
+ * or how long the secret string is.
+ * Both strings must be NUL terminated.
+ * The string must be at most 2^16 bytes long.
+ * If both strings are the same, 1 is returned, otherwise 0.
+ * If either string is NULL, 0 is returned.
+ */
+int
+rcon_streq_consttime(const char *given, const char *secret)
+{
+	unsigned i = 0, j = 0;
+	char r = 0;
+	if (!given || !secret) {
+		return 0;
+	}
+	for (;;) {
+		r |= given[i] ^ secret[j];
+
+		if (given[i] == '\0') {
+			break;
+		}
+		i++;
+
+		// Mix so thoroughly that if known[i] is not NUL,
+		// then all lower 16 bits in mask will be set.
+		unsigned mask = secret[i];
+		mask |= mask << 8;
+		mask |= mask << 4;
+		mask |= mask << 2;
+		mask |= mask << 1;
+
+		// Perform branchless increment with wraparound.
+		j = (j + 1) & mask;
+	}
+	return r == 0;
+}
+
+void
+rcon_strerror(Rcon *rc, int err, char *buf, unsigned max)
+{
+	int src  = (-err) & RCON_ERROR_SOURCE_MASK;
+	int code = (-err) >> RCON_ERROR_CODE_SHIFT;
+	switch (src) {
+	case RCON_ERRSRC_PROTO:
+		// TODO
+		(void)code;
+		break;
+	default:
+		rc->io->cb_strerror(rc->iodata, err, buf, max);
+		break;
+	}
+}
 
 Rcon *
 rcon_create(int maxClients, void *userdata)
@@ -200,18 +335,23 @@ rcon_process(Rcon *rc, int cidx, int pktLen, unsigned char *packet)
 	int32_t type = rcon_read_i32(packet + 4);
 	char *payload = (char *)(packet + 8);
 	int payLen = pktLen - 10;
+	// FIXME make sure that payload is NUL-terminated!
 	switch (type) {
 	case RCON_SERVERDATA_AUTH:
-		// Weird nonsensical packet that is sent by SRCDS
-		rcon_send(rc, cidx, rid, RCON_SERVERDATA_RESPONSE_VALUE, NULL, 0);
-		// Failure
-		//rcon_send(rc, cidx, -1, RCON_SERVERDATA_AUTH_RESPONSE, NULL, 0);
-		// Success
-		rcon_send(rc, cidx, rid, RCON_SERVERDATA_AUTH_RESPONSE, NULL, 0);
+		{
+			// Weird nonsensical packet that is sent by SRCDS
+			rcon_send(rc, cidx, rid, RCON_SERVERDATA_RESPONSE_VALUE, NULL, 0);
+
+			int matches = rcon_streq_consttime(payload, rc->password);
+			rcon_send(rc, cidx, matches ? rid : -1,
+				RCON_SERVERDATA_AUTH_RESPONSE, NULL, 0);
+			// TODO store auth
+		}
 		break;
 
 	case RCON_SERVERDATA_EXECCOMMAND:
 		{
+			// TODO check auth
 			char *result = rc->eval(rc->userdata, payload, payLen);
 			rcon_send(rc, cidx, rid, RCON_SERVERDATA_RESPONSE_VALUE,
 				(const unsigned char *)result, (int)strlen(result));
@@ -278,6 +418,17 @@ rcon_update(Rcon *rc, long timeoutMs)
 			rc->clients[i].inUse = 1;
 		}
 	}
+}
+
+int
+rcon_set_password(Rcon *rc, const char *password)
+{
+	if (password && strlen(password) > RCON_MAX_PASSWORD_LENGTH) {
+		rc->password = NULL;
+		return 0;
+	}
+	rc->password = password;
+	return 1;
 }
 
 static char *
@@ -400,7 +551,7 @@ rcon_tcp_accept(void *userdata)
 
 	fd = accept(tcp->pfds[0].fd, NULL, NULL);
 	if (fd < 0) {
-		return -1;
+		return RCON_BOX_ERROR(RCON_ERRSRC_SYSTEM, get_last_error());
 	}
 
 	for (idx = 1; idx < tcp->nfds; idx++) {
@@ -411,7 +562,7 @@ rcon_tcp_accept(void *userdata)
 	}
 	
 	closesocket(fd);
-	return -1;
+	return RCON_BOX_ERROR(RCON_ERRSRC_PROTO, 1); // TODO
 }
 
 int
@@ -425,7 +576,7 @@ rcon_tcp_send(void *userdata, int idx, const void *data, unsigned len)
 		int s = (int)send(fd, uchars + sent, len - sent, 0);
 		if (s == SOCKET_ERROR) {
 			if (is_benign_error()) continue;
-			else return -1;
+			else return RCON_BOX_ERROR(RCON_ERRSRC_SYSTEM, get_last_error());
 		}
 		sent += s;
 	}
@@ -441,7 +592,7 @@ rcon_tcp_recv(void *userdata, int idx, void *data, unsigned max)
 		int s = (int)recv(fd, data, max, 0);
 		if (s == SOCKET_ERROR) {
 			if (is_benign_error()) continue;
-			else return -1;
+			else return RCON_BOX_ERROR(RCON_ERRSRC_SYSTEM, get_last_error());
 		}
 		return s;
 	}
@@ -467,7 +618,12 @@ int
 rcon_tcp_waitany(void *userdata, long timeoutMs)
 {
 	struct rcon_tcp_block *tcp = userdata;
-	return poll(tcp->pfds, tcp->nfds, timeoutMs);
+	int n = poll(tcp->pfds, tcp->nfds, timeoutMs);
+	if (n < 0) {
+		return RCON_BOX_ERROR(RCON_ERRSRC_SYSTEM, get_last_error());
+	} else {
+		return n;
+	}
 }
 
 int
@@ -475,6 +631,31 @@ rcon_tcp_hasdata(void *userdata, int idx)
 {
 	struct rcon_tcp_block *tcp = userdata;
 	return !!(tcp->pfds[idx].revents & POLLIN);
+}
+
+void
+rcon_tcp_strerror(void *userdata, int err, char *buf, unsigned max)
+{
+	(void)userdata;
+	const char *p;
+	size_t len;
+	int src  = (-err) & RCON_ERROR_SOURCE_MASK;
+	int code = (-err) >> RCON_ERROR_CODE_SHIFT;
+	switch (src) {
+	case RCON_ERRSRC_SYSTEM:
+		// Assume XSI-compliant strerror_r()
+		strerror_r(code, buf, max);
+		break;
+	case RCON_ERRSRC_GAI:
+		p = gai_strerror(code);
+		len = strlen(p) + 1;
+		len = RCON_MIN(len, max);
+		memcpy(buf, p, len);
+		break;
+	default:
+		if (max) buf[0] = 0;
+		break;
+	}
 }
 
 #endif

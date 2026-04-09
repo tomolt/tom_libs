@@ -27,6 +27,7 @@ main()
 {
 	rcon_tcp_init();
 	rcon = rcon_create(2, NULL);
+	rcon_set_password(rcon, "hunter2");
 	rcon->eval = eval_command;
 
 	running = true;
