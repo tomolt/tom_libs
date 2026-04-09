@@ -288,6 +288,11 @@ rcon_port_to_string(int port, char *buf, int max)
 
 /* ---- Global Initialization (Windows only) ---- */
 
+struct rcon_tcp_block {
+	int nfds;
+	struct pollfd pfds[];
+};
+
 void
 rcon_tcp_init(void)
 {
@@ -366,13 +371,14 @@ rcon_tcp_open(const char *hostname, const char *port)
 		freeaddrinfo(ai);
 
 		// Success! Construct a pollfd array and return it.
-		struct pollfd *pfds = calloc(1 + RCON_MAX_CLIENTS, sizeof *pfds);
+		struct rcon_tcp_block *tcp = calloc(sizeof *tcp +
+			(1 + RCON_MAX_CLIENTS) * sizeof *tcp->pfds, 1);
 		for (int idx = 0; idx < 1+RCON_MAX_CLIENTS; idx++) {
-			pfds[idx].fd = -1;
-			pfds[idx].events = POLLIN;
+			tcp->pfds[idx].fd = -1;
+			tcp->pfds[idx].events = POLLIN;
 		}
-		pfds[0].fd = fd;
-		return pfds;
+		tcp->pfds[0].fd = fd;
+		return tcp;
 	}
 
 	freeaddrinfo(ai);
@@ -382,17 +388,17 @@ rcon_tcp_open(const char *hostname, const char *port)
 int
 rcon_tcp_accept(void *userdata)
 {
-	struct pollfd *pfds = userdata;
+	struct rcon_tcp_block *tcp = userdata;
 	int idx, fd;
 
-	fd = accept(pfds[0].fd, NULL, NULL);
+	fd = accept(tcp->pfds[0].fd, NULL, NULL);
 	if (fd < 0) {
 		return -1;
 	}
 
 	for (idx = 1; idx < 1+RCON_MAX_CLIENTS; idx++) {
-		if (pfds[idx].fd < 0) {
-			pfds[idx].fd = fd;
+		if (tcp->pfds[idx].fd < 0) {
+			tcp->pfds[idx].fd = fd;
 			return idx;
 		}
 	}
@@ -404,11 +410,12 @@ rcon_tcp_accept(void *userdata)
 int
 rcon_tcp_send(void *userdata, int idx, const void *data, unsigned len)
 {
-	struct pollfd *pfds = userdata;
+	struct rcon_tcp_block *tcp = userdata;
+	int fd = tcp->pfds[idx].fd;
 	const unsigned char *uchars = data;
 	unsigned sent = 0;
 	while (sent < len) {
-		int s = (int)send(pfds[idx].fd, uchars + sent, len - sent, 0);
+		int s = (int)send(fd, uchars + sent, len - sent, 0);
 		if (s == SOCKET_ERROR) {
 			if (is_benign_error()) continue;
 			else return -1;
@@ -421,9 +428,10 @@ rcon_tcp_send(void *userdata, int idx, const void *data, unsigned len)
 int
 rcon_tcp_recv(void *userdata, int idx, void *data, unsigned max)
 {
-	struct pollfd *pfds = userdata;
+	struct rcon_tcp_block *tcp = userdata;
+	int fd = tcp->pfds[idx].fd;
 	for (;;) {
-		int s = (int)recv(pfds[idx].fd, data, max, 0);
+		int s = (int)recv(fd, data, max, 0);
 		if (s == SOCKET_ERROR) {
 			if (is_benign_error()) continue;
 			else return -1;
@@ -435,31 +443,31 @@ rcon_tcp_recv(void *userdata, int idx, void *data, unsigned max)
 void
 rcon_tcp_close(void *userdata, int idx)
 {
-	struct pollfd *pfds = userdata;
+	struct rcon_tcp_block *tcp = userdata;
 	if (idx == 0) {
 		for (int i = 1; i < 1+RCON_MAX_CLIENTS; i++) {
-			closesocket(pfds[i].fd);
+			closesocket(tcp->pfds[i].fd);
 		}
-		closesocket(pfds[0].fd);
-		free(pfds);
+		closesocket(tcp->pfds[0].fd);
+		free(tcp);
 	} else {
-		closesocket(pfds[idx].fd);
-		pfds[idx].fd = -1;
+		closesocket(tcp->pfds[idx].fd);
+		tcp->pfds[idx].fd = -1;
 	}
 }
 
 int
 rcon_tcp_waitany(void *userdata, long timeoutMs)
 {
-	struct pollfd *pfds = userdata;
-	return poll(pfds, 1+RCON_MAX_CLIENTS, timeoutMs);
+	struct rcon_tcp_block *tcp = userdata;
+	return poll(tcp->pfds, 1+RCON_MAX_CLIENTS, timeoutMs);
 }
 
 int
 rcon_tcp_hasdata(void *userdata, int idx)
 {
-	struct pollfd *pfds = userdata;
-	return !!(pfds[idx].revents & POLLIN);
+	struct rcon_tcp_block *tcp = userdata;
+	return !!(tcp->pfds[idx].revents & POLLIN);
 }
 
 #endif
