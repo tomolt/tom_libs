@@ -3,7 +3,7 @@
 #define RCON_IMPLEMENTATION
 #include <tom_rcon.h>
 
-Rcon *rcon;
+Rcon rcon;
 bool running;
 
 static char *
@@ -26,16 +26,16 @@ int
 main()
 {
 	rcon_tcp_init();
-	rcon = rcon_create(2, NULL);
-	rcon_set_password(rcon, "hunter2");
-	rcon->eval = eval_command;
+	rcon_create_tcp(&rcon, "0.0.0.0", 7023, 2, NULL);
+	rcon_set_password(&rcon, "hunter2");
+	rcon.eval = eval_command;
 
 	running = true;
 	while (running) {
-		rcon_update(rcon, -1);
+		rcon_update(&rcon, -1);
 	}
 
-	rcon_destroy(rcon);
+	rcon_destroy(&rcon);
 	rcon_tcp_uninit();
 	return 0;
 }

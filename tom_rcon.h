@@ -39,11 +39,11 @@
 #ifndef _TOM_RCON_H_
 #define _TOM_RCON_H_
 
+#include <stddef.h>
+
 #define RCON_PORT                "7023"
 #define RCON_TCP_LISTEN_BACKLOG  4
 #define RCON_MAX_PASSWORD_LENGTH 4086
-
-typedef struct rcon Rcon;
 
 /* 'idx' refers to the index of the open connection.
  * They are numbered starting from 1;
@@ -64,10 +64,30 @@ struct rcon_io_impl {
 	void (*cb_strerror)(void *, int, char *, unsigned);
 };
 
+typedef struct rcon Rcon;
+
+struct rcon_client {
+	int recvd;
+	int inUse;
+	int authd;
+	unsigned char buffer[4 + 4096];
+};
+
+struct rcon {
+	struct rcon_client *clients;
+
+	char     *(*eval)(void *userdata, const char *msg, size_t len);
+	void       *userdata;
+	int         maxClients;
+	const char *password;
+
+	const struct rcon_io_impl *io;
+	void *iodata;
+};
+
 void rcon_tcp_init(void);
 void rcon_tcp_uninit(void);
-
-void *rcon_tcp_open(const char *hostname, const char *port, int maxClients);
+int  rcon_tcp_open(const char *hostname, const char *port, int maxClients, void **userdata);
 int  rcon_tcp_accept(void *userdata);
 int  rcon_tcp_send(void *userdata, int idx, const void *data, unsigned len);
 int  rcon_tcp_recv(void *userdata, int idx, void *data, unsigned max);
@@ -86,11 +106,12 @@ static const struct rcon_io_impl rcon_tcp_io_impl = {
 	.cb_strerror = rcon_tcp_strerror,
 };
 
-void  rcon_strerror(Rcon *rc, int err, char *buf, unsigned max);
+void rcon_strerror(Rcon *rc, int err, char *buf, unsigned max);
 
-Rcon *rcon_create (int maxClients, void *userdata);
-void  rcon_destroy(Rcon *rc);
-void  rcon_update (Rcon *rc, long timeoutMs);
+int  rcon_create (Rcon *rc, const struct rcon_io_impl *io, void *iodata, int maxClients, void *userdata);
+int  rcon_create_tcp(Rcon *rc, const char *hostname, int port, int maxClients, void *userdata);
+void rcon_destroy(Rcon *rc);
+void rcon_update (Rcon *rc, long timeoutMs);
 
 /* Sets the server password.
  * The password is not copied and stored, RCON only stores the pointer that you pass in.
@@ -100,7 +121,7 @@ void  rcon_update (Rcon *rc, long timeoutMs);
  * and internally the password is set to NULL (meaning no authentication succeeds).
  * Returns 1 on success.
  */
-int   rcon_set_password(Rcon *rc, const char *password);
+int  rcon_set_password(Rcon *rc, const char *password);
 
 #ifdef RCON_IMPLEMENTATION
 
@@ -194,24 +215,6 @@ get_last_error(void)
 #define RCON_SERVERDATA_EXECCOMMAND    2
 #define RCON_SERVERDATA_RESPONSE_VALUE 0
 
-struct rcon_client {
-	int recvd;
-	int inUse;
-	int authd;
-	unsigned char buffer[4 + 4096];
-};
-
-struct rcon {
-	struct rcon_client *clients;
-	char            *(*eval)(void *userdata, const char *msg, size_t len);
-	void              *userdata;
-	int                maxClients;
-	const char        *password;
-
-	const struct rcon_io_impl *io;
-	void *iodata;
-};
-
 /* Compare a given string with a secret string,
  * without leaking through timings how close the match is,
  * or how long the secret string is.
@@ -266,30 +269,39 @@ rcon_strerror(Rcon *rc, int err, char *buf, unsigned max)
 	}
 }
 
-Rcon *
-rcon_create(int maxClients, void *userdata)
+int
+rcon_create(Rcon *rc, const struct rcon_io_impl *io, void *iodata, int maxClients, void *userdata)
 {
-	Rcon *rc = calloc(1, sizeof *rc);
-	if (!rc) return NULL;
 	rc->maxClients = maxClients;
 	rc->clients = calloc(rc->maxClients, sizeof *rc->clients);
 	if (!rc->clients) {
-		free(rc);
-		return NULL;
+		return RCON_BOX_ERROR(RCON_ERRSRC_PROTO, 1); // TODO
 	}
 	rc->userdata = userdata;
-	rc->io = &rcon_tcp_io_impl;
-	rc->iodata = rcon_tcp_open("0.0.0.0", RCON_PORT, maxClients);
-	return rc;
+	rc->io = io;
+	rc->iodata = iodata;
+	return 0;
+}
+
+int
+rcon_create_tcp(Rcon *rc, const char *hostname, int port, int maxClients, void *userdata)
+{
+	void *iodata;
+	int s;
+	s = rcon_tcp_open(hostname, RCON_PORT, maxClients, &iodata);
+	if (s < 0) return s;
+	s = rcon_create(rc, &rcon_tcp_io_impl, iodata, maxClients, userdata);
+	if (s < 0) {
+		rcon_tcp_io_impl.cb_close(iodata, 0);
+	}
+	return s;
 }
 
 void
 rcon_destroy(Rcon *rc)
 {
-	if (!rc) return;
 	rc->io->cb_close(rc->iodata, 0);
 	free(rc->clients);
-	free(rc);
 }
 
 static inline void
@@ -476,8 +488,8 @@ rcon_tcp_uninit(void)
 #endif
 }
 
-void *
-rcon_tcp_open(const char *hostname, const char *port, int maxClients)
+int
+rcon_tcp_open(const char *hostname, const char *port, int maxClients, void **userdata)
 {
 	// Find contender addresses via getaddrinfo()
 	struct addrinfo *ai, hints = {
@@ -487,8 +499,13 @@ rcon_tcp_open(const char *hostname, const char *port, int maxClients)
 	};
 	int s = getaddrinfo(hostname, port, &hints, &ai);
 	if (s) {
-		rcon_warn("getaddrinfo: %s", gai_strerror(s));
-		return NULL;
+#ifdef _WIN32
+		// gai_strerror() is not thread-safe on Windows.
+		// WSAGetLastError() can be used instead.
+		return RCON_BOX_ERROR(RCON_ERRSRC_SYSTEM, get_last_error());
+#else
+		return RCON_BOX_ERROR(RCON_ERRSRC_GAI, -s);
+#endif
 	}
 
 	// Loop through all the results and bind to the first we can
@@ -536,11 +553,12 @@ rcon_tcp_open(const char *hostname, const char *port, int maxClients)
 			tcp->pfds[idx].events = POLLIN;
 		}
 		tcp->pfds[0].fd = fd;
-		return tcp;
+		*userdata = tcp;
+		return 0;
 	}
 
 	freeaddrinfo(ai);
-	return NULL;
+	return RCON_BOX_ERROR(RCON_ERRSRC_PROTO, 1); // TODO
 }
 
 int
@@ -643,11 +661,11 @@ rcon_tcp_strerror(void *userdata, int err, char *buf, unsigned max)
 	int code = (-err) >> RCON_ERROR_CODE_SHIFT;
 	switch (src) {
 	case RCON_ERRSRC_SYSTEM:
-		// Assume XSI-compliant strerror_r()
+		// Assuming XSI-compliant strerror_r()
 		strerror_r(code, buf, max);
 		break;
 	case RCON_ERRSRC_GAI:
-		p = gai_strerror(code);
+		p = gai_strerror(-code);
 		len = strlen(p) + 1;
 		len = RCON_MIN(len, max);
 		memcpy(buf, p, len);
