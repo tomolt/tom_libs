@@ -4,21 +4,53 @@
 #define RCON_MAX_IP_ADDR_SIZE 128
 #define RCON_PORT        7023
 #define RCON_MAX_CLIENTS 4
+#define RCON_TCP_LISTEN_BACKLOG 4
 
 typedef struct rcon_tcp_socket   RCON_TcpSocket;
 typedef struct rcon_socket_strip RCON_SocketStrip;
 
 typedef struct rcon Rcon;
 
+/* 'idx' refers to the index of the open connection.
+ * They are numbered starting from 1;
+ * Number 0 refers to the listener socket.
+ */
+
+struct rcon_io_impl {
+	int  (*cb_accept)(void *);
+	int  (*cb_send)(void *, int, const void *, unsigned);
+	int  (*cb_recv)(void *, int, void *, unsigned);
+	void (*cb_close)(void *, int);
+	int  (*cb_waitany)(void *, long);
+	int  (*cb_hasdata)(void *, int);
+};
+
+void *rcon_tcp_open(const char *hostname, const char *port);
+int  rcon_tcp_accept(void *userdata);
+int  rcon_tcp_send(void *userdata, int idx, const void *data, unsigned len);
+int  rcon_tcp_recv(void *userdata, int idx, void *data, unsigned max);
+void rcon_tcp_close(void *userdata, int idx);
+int  rcon_tcp_waitany(void *userdata, long timeoutMs);
+int  rcon_tcp_hasdata(void *userdata, int idx);
+
+static const struct rcon_io_impl rcon_tcp_io_impl = {
+	.cb_accept  = rcon_tcp_accept,
+	.cb_send    = rcon_tcp_send,
+	.cb_recv    = rcon_tcp_recv,
+	.cb_close   = rcon_tcp_close,
+	.cb_waitany = rcon_tcp_waitany,
+	.cb_hasdata = rcon_tcp_hasdata,
+};
+
 void rcon_socket_init(void);
 void rcon_socket_uninit(void);
 
-RCON_TcpSocket *rcon_tcp_listen (const char *hostname, int port);
-RCON_TcpSocket *rcon_tcp_accept(RCON_TcpSocket *sock);
+RCON_TcpSocket *rcon_sock_listen (const char *hostname, int port);
+RCON_TcpSocket *rcon_sock_accept(RCON_TcpSocket *sock);
 
-int  rcon_tcp_send (RCON_TcpSocket *sock, const void *buf, int len);
-int  rcon_tcp_recv (RCON_TcpSocket *sock, void *buf, int len);
-void rcon_tcp_close(RCON_TcpSocket *sock);
+int  rcon_sock_send (RCON_TcpSocket *sock, const void *buf, int len);
+int  rcon_sock_recv (RCON_TcpSocket *sock, void *buf, int len);
+void rcon_sock_close(RCON_TcpSocket *sock);
 
 void rcon_socket_strip_init  (RCON_SocketStrip *strip);
 int  rcon_socket_strip_check (RCON_SocketStrip *strip, long timeoutMs);
@@ -63,6 +95,7 @@ is_benign_error(void)
 # include <unistd.h>
 # include <fcntl.h>
 # include <netdb.h>
+# include <poll.h>
 # include <errno.h>
 
 // We mimic Winsock on Unixoid systems here, since it's easier than
@@ -83,6 +116,7 @@ is_benign_error(void)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
 #define rcon_warn(...) printf(__VA_ARGS__)
 #define rcon_log(...) printf(__VA_ARGS__)
@@ -129,7 +163,7 @@ rcon_create(void *userdata)
 	if (!rc) return NULL;
 	rc->userdata = userdata;
 	rcon_socket_strip_init(&rc->strip);
-	rc->server = rcon_tcp_listen("0.0.0.0", RCON_PORT);
+	rc->server = rcon_sock_listen("0.0.0.0", RCON_PORT);
 	rcon_socket_strip_add(&rc->strip, rc->server);
 	return rc;
 }
@@ -139,10 +173,10 @@ rcon_destroy(Rcon *rc)
 {
 	if (!rc) return;
 	for (int i = 0; i < RCON_MAX_CLIENTS; i++) {
-		rcon_tcp_close(rc->clients[i].socket);
+		rcon_sock_close(rc->clients[i].socket);
 		rc->clients[i].inUse = 0;
 	}
-	rcon_tcp_close(rc->server);
+	rcon_sock_close(rc->server);
 	free(rc);
 }
 
@@ -177,7 +211,7 @@ rcon_send(struct rcon_client *client, int32_t rid, int32_t type, const unsigned 
 		packet[12 + fragPayLen + 1] = 0;
 		//int sent = 0;
 		//while ((sent += SDLNet_TCP_Send(client->socket, packet + sent, 4 + 10 + fragPayLen - sent)) < fragPayLen) {}
-		rcon_tcp_send(client->socket, packet, 4 + 10 + fragPayLen);
+		rcon_sock_send(client->socket, packet, 4 + 10 + fragPayLen);
 		payload += fragPayLen;
 		length -= fragPayLen;
 	} while (length);
@@ -231,7 +265,7 @@ rcon_update(Rcon *rc, long timeoutMs)
 		if (!rcon_socket_strip_ready(&rc->strip, client->socket)) continue;
 		int drop = 0;
 		// TODO proper handling of huge input
-		int got = rcon_tcp_recv(client->socket,
+		int got = rcon_sock_recv(client->socket,
 			client->buffer + client->recvd,
 			sizeof client->buffer - client->recvd);
 		if (got == 0) {
@@ -256,12 +290,12 @@ rcon_update(Rcon *rc, long timeoutMs)
 		if (drop) {
 			rcon_log("Dropping RCON client.");
 			rcon_socket_strip_remove(&rc->strip, client->socket);
-			rcon_tcp_close(client->socket);
+			rcon_sock_close(client->socket);
 			client->inUse = 0;
 		}
 	}
 	if (rcon_socket_strip_ready(&rc->strip, rc->server)) {
-		RCON_TcpSocket *socket = rcon_tcp_accept(rc->server);
+		RCON_TcpSocket *socket = rcon_sock_accept(rc->server);
 		if (socket) {
 			int i;
 			for (i = 0; i < RCON_MAX_CLIENTS; i++)
@@ -273,7 +307,7 @@ rcon_update(Rcon *rc, long timeoutMs)
 				rc->clients[i].inUse = 1;
 				rcon_socket_strip_add(&rc->strip, socket);
 			} else {
-				rcon_tcp_close(socket);
+				rcon_sock_close(socket);
 			}
 		}
 	}
@@ -339,7 +373,7 @@ make_tcp_socket(int fd, const void *addr, socklen_t addrLen)
 }
 
 RCON_TcpSocket *
-rcon_tcp_listen(const char *hostname, int port)
+rcon_sock_listen(const char *hostname, int port)
 {
 	char portbuf[10], *portstr;
 	portstr = rcon_port_to_string(port, portbuf, 10);
@@ -402,7 +436,7 @@ rcon_tcp_listen(const char *hostname, int port)
 }
 
 RCON_TcpSocket *
-rcon_tcp_accept(RCON_TcpSocket *sock)
+rcon_sock_accept(RCON_TcpSocket *sock)
 {
 	// Accept a new file descriptor
 	struct sockaddr_storage addr;
@@ -423,7 +457,7 @@ rcon_tcp_accept(RCON_TcpSocket *sock)
 }
 
 int
-rcon_tcp_send(RCON_TcpSocket *sock, const void *buf, int len)
+rcon_sock_send(RCON_TcpSocket *sock, const void *buf, int len)
 {
 	const unsigned char *uchars = buf;
 	int sent = 0;
@@ -439,7 +473,7 @@ rcon_tcp_send(RCON_TcpSocket *sock, const void *buf, int len)
 }
 
 int
-rcon_tcp_recv(RCON_TcpSocket *sock, void *buf, int len)
+rcon_sock_recv(RCON_TcpSocket *sock, void *buf, int len)
 {
 	for (;;) {
 		int s = (int)recv(sock->fd, buf, len, 0);
@@ -452,7 +486,7 @@ rcon_tcp_recv(RCON_TcpSocket *sock, void *buf, int len)
 }
 
 void
-rcon_tcp_close(RCON_TcpSocket *sock)
+rcon_sock_close(RCON_TcpSocket *sock)
 {
 	if (!sock) return;
 	closesocket(sock->fd);
@@ -520,6 +554,154 @@ int
 rcon_socket_strip_ready(RCON_SocketStrip *strip, RCON_TcpSocket *sock)
 {
 	return FD_ISSET(sock->fd, &strip->rfds);
+}
+
+void *
+rcon_tcp_open(const char *hostname, const char *port)
+{
+	// Find contender addresses via getaddrinfo()
+	struct addrinfo *ai, hints = {
+		.ai_flags    = AI_NUMERICSERV | AI_PASSIVE,
+		.ai_family   = AF_UNSPEC,
+		.ai_socktype = SOCK_STREAM,
+	};
+	int s = getaddrinfo(hostname, port, &hints, &ai);
+	if (s) {
+		rcon_warn("getaddrinfo: %s", gai_strerror(s));
+		return NULL;
+	}
+
+	// Loop through all the results and bind to the first we can
+	struct addrinfo *p;
+	for (p = ai; p; p = p->ai_next) {
+		// Create socket file descriptor
+		int fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+		if (fd == INVALID_SOCKET) continue;
+
+		// Re-use address
+#ifndef _WIN32
+		const int iyes = 1;
+		setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &iyes, sizeof(int));
+#endif
+		
+		// Bind to the address
+		if (bind(fd, p->ai_addr, p->ai_addrlen) == SOCKET_ERROR) {
+			closesocket(fd);
+			continue;
+		}
+
+		// Listen for incoming connections
+		if (listen(fd, RCON_TCP_LISTEN_BACKLOG) == SOCKET_ERROR) {
+			closesocket(fd);
+			continue;
+		}
+
+		// Set socket to non-blocking mode
+#ifdef _WIN32
+		u_long ulyes = 1;
+		ioctlsocket(fd, FIONBIO, &ulyes);
+#else
+		int flags = fcntl(fd, F_GETFL, 0);
+		fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+#endif
+
+		freeaddrinfo(ai);
+
+		// Success! Construct a pollfd array and return it.
+		struct pollfd *pfds = calloc(1 + RCON_MAX_CLIENTS, sizeof *pfds);
+		for (int idx = 0; idx < 1+RCON_MAX_CLIENTS; idx++) {
+			pfds[idx].fd = -1;
+			pfds[idx].events = POLLIN;
+		}
+		pfds[0].fd = fd;
+		return pfds;
+	}
+
+	freeaddrinfo(ai);
+	return NULL;
+}
+
+int
+rcon_tcp_accept(void *userdata)
+{
+	struct pollfd *pfds = userdata;
+	int idx, fd;
+
+	fd = accept(pfds[0].fd, NULL, NULL);
+	if (fd < 0) {
+		return -1;
+	}
+
+	for (idx = 1; idx < 1+RCON_MAX_CLIENTS; idx++) {
+		if (pfds[idx].fd < 0) {
+			pfds[idx].fd = fd;
+			return idx;
+		}
+	}
+	
+	closesocket(fd);
+	return -1;
+}
+
+int
+rcon_tcp_send(void *userdata, int idx, const void *data, unsigned len)
+{
+	struct pollfd *pfds = userdata;
+	const unsigned char *uchars = data;
+	unsigned sent = 0;
+	while (sent < len) {
+		int s = (int)send(pfds[idx].fd, uchars + sent, len - sent, 0);
+		if (s == SOCKET_ERROR) {
+			if (is_benign_error()) continue;
+			else return -1;
+		}
+		sent += s;
+	}
+	return sent;
+}
+
+int
+rcon_tcp_recv(void *userdata, int idx, void *data, unsigned max)
+{
+	struct pollfd *pfds = userdata;
+	for (;;) {
+		int s = (int)recv(pfds[idx].fd, data, max, 0);
+		if (s == SOCKET_ERROR) {
+			if (is_benign_error()) continue;
+			else return -1;
+		}
+		return s;
+	}
+}
+
+void
+rcon_tcp_close(void *userdata, int idx)
+{
+	struct pollfd *pfds = userdata;
+	if (idx == 0) {
+		for (int i = 1; i < 1+RCON_MAX_CLIENTS; i++) {
+			closesocket(pfds[i].fd);
+		}
+		closesocket(pfds[0].fd);
+		free(pfds);
+	} else {
+		closesocket(pfds[idx].fd);
+		pfds[idx].fd = -1;
+	}
+}
+
+int
+rcon_tcp_waitany(void *userdata, long timeoutMs)
+{
+	struct pollfd *pfds = userdata;
+	return poll(pfds, 1+RCON_MAX_CLIENTS, timeoutMs);
+}
+
+int
+rcon_tcp_hasdata(void *userdata, int idx)
+{
+	struct pollfd *pfds = userdata;
+	return !!(pfds[idx].revents & POLLIN);
 }
 
 #endif
