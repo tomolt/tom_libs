@@ -241,11 +241,14 @@ rcon_streq_consttime(const char *given, const char *secret)
 
 		// Mix so thoroughly that if known[i] is not NUL,
 		// then all lower 16 bits in mask will be set.
-		unsigned mask = secret[i];
+		unsigned mask = secret[j];
 		mask |= mask << 8;
 		mask |= mask << 4;
 		mask |= mask << 2;
 		mask |= mask << 1;
+		mask |= mask >> 4;
+		mask |= mask >> 2;
+		mask |= mask >> 1;
 
 		// Perform branchless increment with wraparound.
 		j = (j + 1) & mask;
