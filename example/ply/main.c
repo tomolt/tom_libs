@@ -38,9 +38,11 @@ main(int argc, const char **argv)
 
 	int s = ply_parse_header(&ply);
 	if (s < 0) {
+		fclose(plyFile);
 		fprintf(stderr, "can't parse ply file\n");
 		return 1;
 	}
+	fclose(plyFile);
 
 	struct ply_element *element = ply.elements;
 	while (element) {

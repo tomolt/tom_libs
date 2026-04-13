@@ -12,7 +12,8 @@
 
 #define PLY_ERR_SPACE  -100
 #define PLY_ERR_LIMIT  -200
-#define PLY_ERR_SYNTAX -300
+#define PLY_ERR_READ   -300
+#define PLY_ERR_SYNTAX -400
 
 typedef int (*ply_read_cb)(void *userdata, void *buffer, unsigned max);
 
@@ -109,6 +110,7 @@ ply_strerror(int status)
 	switch (status) {
 	case PLY_ERR_SPACE:  return "Not Enough Space";
 	case PLY_ERR_LIMIT:  return "Internal Limit Exceeded";
+	case PLY_ERR_READ:   return "I/O Read Error";
 	case PLY_ERR_SYNTAX: return "Syntax Error";
 	default:             return "";
 	}
@@ -187,16 +189,16 @@ ply_parse_element(struct ply_parser *ply, char **tokenState)
 
 	char *token;
 	token = ply_next_token(tokenState, ' ');
-	if (!token) return -1;
+	if (!token) return PLY_ERR_SYNTAX;
 
 	strncpy(element->name, token, PLY_MAX_NAME - 1);
 
 	token = ply_next_token(tokenState, ' ');
-	if (!token) return -1;
+	if (!token) return PLY_ERR_SYNTAX;
 
 	char *end;
 	element->numTuples = strtoul(token, &end, 10);
-	if (*end) return -1;
+	if (*end) return PLY_ERR_SYNTAX;
 
 	element->next = *ply->elementsTail;
 	*ply->elementsTail = element;
@@ -209,32 +211,32 @@ ply_parse_element(struct ply_parser *ply, char **tokenState)
 int
 ply_parse_property(struct ply_parser *ply, char **tokenState)
 {
-	if (!ply->propertiesTail) return -1;
+	if (!ply->propertiesTail) return PLY_ERR_SYNTAX;
 
 	struct ply_property *property = ply_reserve(ply, sizeof *property);
 
 	char *token;
 	token = ply_next_token(tokenState, ' ');
-	if (!token) return -1;
+	if (!token) return PLY_ERR_SYNTAX;
 
 	if (!strcmp(token, "list")) {
 		property->isList = 1;
 
 		token = ply_next_token(tokenState, ' ');
-		if (!token) return -1;
+		if (!token) return PLY_ERR_SYNTAX;
 
-		if (ply_parse_type(token, &property->indexType) < 0) return -1;
+		int s = ply_parse_type(token, &property->indexType);
+		if (s < 0) return s;
 
 		token = ply_next_token(tokenState, ' ');
-		if (!token) return -1;
-
-		if (ply_parse_type(token, &property->dataType) < 0) return -1;
-	} else {
-		if (ply_parse_type(token, &property->dataType) < 0) return -1;
+		if (!token) return PLY_ERR_SYNTAX;
 	}
 
+	int s = ply_parse_type(token, &property->dataType);
+	if (s < 0) return s;
+
 	token = ply_next_token(tokenState, ' ');
-	if (!token) return -1;
+	if (!token) return PLY_ERR_SYNTAX;
 
 	strncpy(property->name, token, PLY_MAX_NAME - 1);
 
@@ -250,24 +252,28 @@ ply_parse_header_line(struct ply_parser *ply, char *line)
 {
 	char *tokenState = line;
 	char *token = ply_next_token(&tokenState, ' ');
-	if (!token) return -1;
+	if (!token) return PLY_ERR_SYNTAX;
 
+	int s;
 	if (!strcmp(token, "end_header")) {
 		return 0;
 	} else if (!strcmp(token, "format")) {
-		if (ply_parse_format(ply, &tokenState) < 0) return -1;
+		s = ply_parse_format(ply, &tokenState);
+		if (s < 0) return s;
 	} else if (!strcmp(token, "element")) {
-		if (ply_parse_element(ply, &tokenState) < 0) return -1;
+		s = ply_parse_element(ply, &tokenState);
+		if (s < 0) return s;
 	} else if (!strcmp(token, "property")) {
-		if (ply_parse_property(ply, &tokenState) < 0) return -1;
+		s = ply_parse_property(ply, &tokenState);
+		if (s < 0) return s;
 	} else if (!strcmp(token, "comment")) {
 		return 1;
 	} else {
-		return -1;
+		return PLY_ERR_SYNTAX;
 	}
 
 	token = ply_next_token(&tokenState, ' ');
-	if (token) return -1;
+	if (token) return PLY_ERR_SYNTAX;
 
 	return 1;
 }
@@ -275,20 +281,16 @@ ply_parse_header_line(struct ply_parser *ply, char *line)
 int
 ply_parse_header(struct ply_parser *ply)
 {
-	if (!ply) {
-		return -1;
-	}
-
 	const unsigned maxLine = 1024;
 	char line[maxLine];
 	unsigned length;
 
 	int r = ply->read_cb(ply->userdata, line, maxLine);
-	if (r < 0) return -1;
+	if (r < 0) return PLY_ERR_READ;
 	length = (unsigned)r;
 
 	if (length < 4 || !!memcmp(line, "ply\n", 4)) {
-		return -1;
+		return PLY_ERR_SYNTAX;
 	}
 	length -= 4;
 	memmove(line, line + 4, length);
@@ -300,17 +302,15 @@ ply_parse_header(struct ply_parser *ply)
 
 	for (;;) {
 		int r = ply->read_cb(ply->userdata, line + length, maxLine - length);
-		if (r < 0) return -1;
+		if (r < 0) return PLY_ERR_READ;
 		length += (unsigned)r;
 
 		char *nl = strchr(line, '\n');
-		if (!nl) return -1;
+		if (!nl) return PLY_ERR_SYNTAX;
 		*nl = 0;
 
 		int s = ply_parse_header_line(ply, line);
-		if (s < 0) {
-			return -1;
-		}
+		if (s < 0) return s;
 		if (s == 0) break;
 
 		length -= nl + 1 - line;
@@ -355,40 +355,40 @@ ply_read_datum_ascii(const char *str, enum ply_type type, union ply_datum *datum
 	switch (type) {
 	case PLY_TYPE_INT8:
 		l = strtol(str, &end, 10);
-		if (l < INT8_MIN) return -1;
-		if (l > INT8_MAX) return -1;
+		if (l < INT8_MIN) return PLY_ERR_SYNTAX;
+		if (l > INT8_MAX) return PLY_ERR_SYNTAX;
 		datum->i8 = (int8_t)l;
 		break;
 
 	case PLY_TYPE_UINT8:
 		u = strtoul(str, &end, 10);
-		if (u > UINT8_MAX) return -1;
+		if (u > UINT8_MAX) return PLY_ERR_SYNTAX;
 		datum->u8 = (uint8_t)u;
 		break;
 
 	case PLY_TYPE_INT16:
 		l = strtol(str, &end, 10);
-		if (l < INT16_MIN) return -1;
-		if (l > INT16_MAX) return -1;
+		if (l < INT16_MIN) return PLY_ERR_SYNTAX;
+		if (l > INT16_MAX) return PLY_ERR_SYNTAX;
 		datum->i16 = (int16_t)l;
 		break;
 
 	case PLY_TYPE_UINT16:
 		u = strtoul(str, &end, 10);
-		if (u > UINT16_MAX) return -1;
+		if (u > UINT16_MAX) return PLY_ERR_SYNTAX;
 		datum->u16 = (uint16_t)u;
 		break;
 
 	case PLY_TYPE_INT32:
 		l = strtol(str, &end, 10);
-		if (l < INT32_MIN) return -1;
-		if (l > INT32_MAX) return -1;
+		if (l < INT32_MIN) return PLY_ERR_SYNTAX;
+		if (l > INT32_MAX) return PLY_ERR_SYNTAX;
 		datum->i32 = (int32_t)l;
 		break;
 
 	case PLY_TYPE_UINT32:
 		u = strtoul(str, &end, 10);
-		if (u > UINT32_MAX) return -1;
+		if (u > UINT32_MAX) return PLY_ERR_SYNTAX;
 		datum->u32 = (uint32_t)u;
 		break;
 	
@@ -400,7 +400,7 @@ ply_read_datum_ascii(const char *str, enum ply_type type, union ply_datum *datum
 		datum->f64 = strtod(str, &end);
 		break;
 	}
-	if (*end) return -1;
+	if (*end) return PLY_ERR_SYNTAX;
 	return 0;
 }
 
