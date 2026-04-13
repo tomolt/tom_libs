@@ -4,20 +4,17 @@
  */
 
 #ifndef _TOM_PLY_H_
-#endif
+#define _TOM_PLY_H_
 
-#ifdef PLY_IMPLEMENTATION
-
-#include <stdio.h>
-#include <stdlib.h>
 #include <stdint.h>
-#include <string.h>
 
 #define PLY_MAX_NAME 32
 
-#define PLY_ERR_SPACE  -1
-#define PLY_ERR_LIMIT  -2
-#define PLY_ERR_SYNTAX -3
+#define PLY_ERR_SPACE  -100
+#define PLY_ERR_LIMIT  -200
+#define PLY_ERR_SYNTAX -300
+
+typedef int (*ply_read_cb)(void *userdata, void *buffer, unsigned max);
 
 enum ply_format {
 	PLY_FORMAT_UNKNOWN = 0,
@@ -60,6 +57,8 @@ struct ply_parser {
 	char *workArea;
 	size_t workSize;
 	size_t workBreak;
+	ply_read_cb read_cb;
+	void *userdata;
 };
 
 union ply_datum {
@@ -73,6 +72,13 @@ union ply_datum {
 	double   f64;
 	char     raw[8];
 };
+
+#endif
+
+#ifdef PLY_IMPLEMENTATION
+
+#include <stdlib.h>
+#include <string.h>
 
 static const char *ply_type_names[] = {
 	"int8",    "char",
@@ -267,24 +273,25 @@ ply_parse_header_line(struct ply_parser *ply, char *line)
 }
 
 int
-ply_load_file(struct ply_parser *ply, const char *filename)
+ply_parse_header(struct ply_parser *ply)
 {
-	if (!filename || !ply) {
+	if (!ply) {
 		return -1;
 	}
 
-	FILE *file = fopen(filename, "rb");
-	if (!file) {
-		return -1;
-	}
-
-	const size_t maxLine = 1024;
+	const unsigned maxLine = 1024;
 	char line[maxLine];
+	unsigned length;
 
-	if (!fgets(line, maxLine, file) || !!strcmp(line, "ply\n")) {
-		fclose(file);
+	int r = ply->read_cb(ply->userdata, line, maxLine);
+	if (r < 0) return -1;
+	length = (unsigned)r;
+
+	if (length < 4 || !!memcmp(line, "ply\n", 4)) {
 		return -1;
 	}
+	length -= 4;
+	memmove(line, line + 4, length);
 
 	ply->format = PLY_FORMAT_UNKNOWN;
 	ply->elements = NULL;
@@ -292,28 +299,51 @@ ply_load_file(struct ply_parser *ply, const char *filename)
 	ply->propertiesTail = NULL;
 
 	for (;;) {
-		if (!fgets(line, maxLine, file)) {
-			fclose(file);
-			return -1;
-		}
+		int r = ply->read_cb(ply->userdata, line + length, maxLine - length);
+		if (r < 0) return -1;
+		length += (unsigned)r;
 
-		size_t len = strlen(line);
-		if (!len || line[len-1] != '\n') {
-			fclose(file);
-			return -1;
-		}
-		line[len-1] = 0;
+		char *nl = strchr(line, '\n');
+		if (!nl) return -1;
+		*nl = 0;
 
 		int s = ply_parse_header_line(ply, line);
 		if (s < 0) {
-			fclose(file);
 			return -1;
 		}
 		if (s == 0) break;
+
+		length -= nl + 1 - line;
+		memmove(line, nl + 1, length);
 	}
 
-	fclose(file);
 	return 0;
+}
+
+struct ply_element *
+ply_get_element_by_name(const struct ply_parser *ply, const char *name)
+{
+	struct ply_element *element = ply->elements;
+	while (element) {
+		if (!strcmp(element->name, name)) {
+			return element;
+		}
+		element = element->next;
+	}
+	return NULL;
+}
+
+struct ply_property *
+ply_get_property_by_name(const struct ply_element *element, const char *name)
+{
+	struct ply_property *property = element->properties;
+	while (property) {
+		if (!strcmp(property->name, name)) {
+			return property;
+		}
+		property = property->next;
+	}
+	return NULL;
 }
 
 int

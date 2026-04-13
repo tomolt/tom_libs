@@ -5,10 +5,26 @@
 #include <tom_ply.h>
 
 int
+file_read_callback(void *file, void *buffer, unsigned max)
+{
+	size_t got = fread(buffer, 1, max, file);
+	if (!got && ferror(file)) {
+		return -1;
+	}
+	return (int)got;
+}
+
+int
 main(int argc, const char **argv)
 {
 	if (argc != 2) {
 		fprintf(stderr, "usage: printply <file>\n");
+		return 1;
+	}
+
+	FILE *plyFile = fopen(argv[1], "rb");
+	if (!plyFile) {
+		fprintf(stderr, "can't open ply file\n");
 		return 1;
 	}
 
@@ -17,10 +33,12 @@ main(int argc, const char **argv)
 	ply.workArea = calloc(1, ply.workSize);
 	ply.workBreak = ply.workSize;
 	ply.workBreak &= ~(size_t)0xF;
+	ply.userdata = plyFile;
+	ply.read_cb = file_read_callback;
 
-	int s = ply_load_file(&ply, argv[1]);
+	int s = ply_parse_header(&ply);
 	if (s < 0) {
-		fprintf(stderr, "can't load ply file\n");
+		fprintf(stderr, "can't parse ply file\n");
 		return 1;
 	}
 
