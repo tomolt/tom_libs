@@ -177,6 +177,7 @@ ply_parse_element(struct ply_parser *ply, char **tokenState)
 	if (*end) return -1;
 
 	element->next = *ply->elementsTail;
+	*ply->elementsTail = element;
 	ply->elementsTail = &element->next;
 	ply->propertiesTail = &element->properties;
 
@@ -194,7 +195,21 @@ ply_parse_property(struct ply_parser *ply, char **tokenState)
 	token = ply_next_token(tokenState, ' ');
 	if (!token) return -1;
 
-	if (ply_parse_type(token, &property->dataType) < 0) return -1;
+	if (!strcmp(token, "list")) {
+		property->isList = 1;
+
+		token = ply_next_token(tokenState, ' ');
+		if (!token) return -1;
+
+		if (ply_parse_type(token, &property->indexType) < 0) return -1;
+
+		token = ply_next_token(tokenState, ' ');
+		if (!token) return -1;
+
+		if (ply_parse_type(token, &property->dataType) < 0) return -1;
+	} else {
+		if (ply_parse_type(token, &property->dataType) < 0) return -1;
+	}
 
 	token = ply_next_token(tokenState, ' ');
 	if (!token) return -1;
@@ -202,6 +217,7 @@ ply_parse_property(struct ply_parser *ply, char **tokenState)
 	strncpy(property->name, token, PLY_MAX_NAME - 1);
 
 	property->next = *ply->propertiesTail;
+	*ply->propertiesTail = property;
 	ply->propertiesTail = &property->next;
 
 	return 0;
@@ -222,14 +238,14 @@ ply_parse_header_line(struct ply_parser *ply, char *line)
 		if (ply_parse_element(ply, &tokenState) < 0) return -1;
 	} else if (!strcmp(token, "property")) {
 		if (ply_parse_property(ply, &tokenState) < 0) return -1;
+	} else if (!strcmp(token, "comment")) {
+		return 1;
 	} else {
-		if (!!strcmp(token, "comment")) {
-			return -1;
-		}
+		return -1;
 	}
 
 	token = ply_next_token(&tokenState, ' ');
-	if (!token) return -1;
+	if (token) return -1;
 
 	return 1;
 }
@@ -254,14 +270,23 @@ ply_load_file(struct ply_parser *ply, const char *filename)
 		return -1;
 	}
 
-	memset(ply, 0, sizeof *ply);
+	ply->format = PLY_FORMAT_UNKNOWN;
+	ply->elements = NULL;
 	ply->elementsTail = &ply->elements;
+	ply->propertiesTail = NULL;
 
 	for (;;) {
 		if (!fgets(line, maxLine, file)) {
 			fclose(file);
 			return -1;
 		}
+
+		size_t len = strlen(line);
+		if (!len || line[len-1] != '\n') {
+			fclose(file);
+			return -1;
+		}
+		line[len-1] = 0;
 
 		int s = ply_parse_header_line(ply, line);
 		if (s < 0) {
