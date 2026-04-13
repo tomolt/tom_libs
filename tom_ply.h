@@ -15,6 +15,10 @@
 
 #define PLY_MAX_NAME 32
 
+#define PLY_ERR_SPACE  -1
+#define PLY_ERR_LIMIT  -2
+#define PLY_ERR_SYNTAX -3
+
 enum ply_format {
 	PLY_FORMAT_UNKNOWN = 0,
 	PLY_FORMAT_ASCII,
@@ -67,6 +71,7 @@ union ply_datum {
 	uint32_t u32;
 	float    f32;
 	double   f64;
+	char     raw[8];
 };
 
 static const char *ply_type_names[] = {
@@ -91,6 +96,17 @@ static unsigned ply_type_sizes[] = {
 	4,
 	8,
 };
+
+const char *
+ply_strerror(int status)
+{
+	switch (status) {
+	case PLY_ERR_SPACE:  return "Not Enough Space";
+	case PLY_ERR_LIMIT:  return "Internal Limit Exceeded";
+	case PLY_ERR_SYNTAX: return "Syntax Error";
+	default:             return "";
+	}
+}
 
 void *
 ply_reserve(struct ply_parser *ply, size_t size)
@@ -130,7 +146,7 @@ ply_parse_type(const char *str, enum ply_type *type)
 			return 0;
 		}
 	}
-	return -1;
+	return PLY_ERR_SYNTAX;
 }
 
 int
@@ -138,7 +154,7 @@ ply_parse_format(struct ply_parser *ply, char **tokenState)
 {
 	char *token;
 	token = ply_next_token(tokenState, ' ');
-	if (!token) return -1;
+	if (!token) return PLY_ERR_SYNTAX;
 
 	if (!strcmp(token, "ascii")) {
 		ply->format = PLY_FORMAT_ASCII;
@@ -147,13 +163,13 @@ ply_parse_format(struct ply_parser *ply, char **tokenState)
 	} else if (!strcmp(token, "binary_big_endian")) {
 		ply->format = PLY_FORMAT_BINARY_BIG_ENDIAN;
 	} else {
-		return -1;
+		return PLY_ERR_SYNTAX;
 	}
 
 	token = ply_next_token(tokenState, ' ');
-	if (!token) return -1;
+	if (!token) return PLY_ERR_SYNTAX;
 
-	if (!!strcmp(token, "1.0")) return -1;
+	if (!!strcmp(token, "1.0")) return PLY_ERR_SYNTAX;
 
 	return 0;
 }
@@ -298,6 +314,99 @@ ply_load_file(struct ply_parser *ply, const char *filename)
 
 	fclose(file);
 	return 0;
+}
+
+int
+ply_read_datum_ascii(const char *str, enum ply_type type, union ply_datum *datum)
+{
+	char *end;
+	long l;
+	unsigned long u;
+	switch (type) {
+	case PLY_TYPE_INT8:
+		l = strtol(str, &end, 10);
+		if (l < INT8_MIN) return -1;
+		if (l > INT8_MAX) return -1;
+		datum->i8 = (int8_t)l;
+		break;
+
+	case PLY_TYPE_UINT8:
+		u = strtoul(str, &end, 10);
+		if (u > UINT8_MAX) return -1;
+		datum->u8 = (uint8_t)u;
+		break;
+
+	case PLY_TYPE_INT16:
+		l = strtol(str, &end, 10);
+		if (l < INT16_MIN) return -1;
+		if (l > INT16_MAX) return -1;
+		datum->i16 = (int16_t)l;
+		break;
+
+	case PLY_TYPE_UINT16:
+		u = strtoul(str, &end, 10);
+		if (u > UINT16_MAX) return -1;
+		datum->u16 = (uint16_t)u;
+		break;
+
+	case PLY_TYPE_INT32:
+		l = strtol(str, &end, 10);
+		if (l < INT32_MIN) return -1;
+		if (l > INT32_MAX) return -1;
+		datum->i32 = (int32_t)l;
+		break;
+
+	case PLY_TYPE_UINT32:
+		u = strtoul(str, &end, 10);
+		if (u > UINT32_MAX) return -1;
+		datum->u32 = (uint32_t)u;
+		break;
+	
+	case PLY_TYPE_FLOAT32:
+		datum->f32 = strtof(str, &end);
+		break;
+
+	case PLY_TYPE_FLOAT64:
+		datum->f64 = strtod(str, &end);
+		break;
+	}
+	if (*end) return -1;
+	return 0;
+}
+
+int
+ply_read_datum_native(const char *raw, enum ply_type type, union ply_datum *datum)
+{
+	unsigned size = ply_type_sizes[type];
+	// FIXME this won't work on big-endian machines!
+	memcpy(datum->raw, raw, size);
+	return 0;
+}
+
+int
+ply_read_datum_reversed(const char *raw, enum ply_type type, union ply_datum *datum)
+{
+	unsigned size = ply_type_sizes[type];
+	// FIXME this won't work on big-endian machines!
+	memcpy(datum->raw, raw, size);
+	for (unsigned i = 0, j = size - 1; i < j; i++, j--) {
+		char tmp      = datum->raw[i];
+		datum->raw[i] = datum->raw[j];
+		datum->raw[j] = tmp;
+	}
+	return 0;
+}
+
+int
+ply_read_datum(enum ply_format format, const char *raw, enum ply_type type, union ply_datum *datum)
+{
+	switch (format) {
+	case PLY_FORMAT_ASCII:
+		return ply_read_datum_ascii(raw, type, datum);
+	// TODO binary formats
+	default:
+		return -1;
+	}
 }
 
 #endif
