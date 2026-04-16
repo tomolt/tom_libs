@@ -102,6 +102,9 @@ static inline const char *
 ply_property_get_name(PLY_PROPERTY property) { return property->name; }
 
 static inline enum ply_type
+ply_property_is_list(PLY_PROPERTY property) { return property->isList; }
+
+static inline enum ply_type
 ply_property_get_index_type(PLY_PROPERTY property) { return property->indexType; }
 
 static inline enum ply_type

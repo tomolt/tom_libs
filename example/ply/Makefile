@@ -12,12 +12,12 @@ OBJS = main.o
 
 .PHONY: all clean
 
-all: printply
+all: ply2c
 
 clean:
-	$(RM) printply $(OBJS)
+	$(RM) ply2c $(OBJS)
 
-printply: ${OBJS}
+ply2c: ${OBJS}
 	$(LD) -o $@ $(LDFLAGS) $(OBJS)
 
 .c.o:
