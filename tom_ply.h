@@ -235,7 +235,7 @@ ply_parser_set_handler(struct ply_parser *ply, const struct ply_handler *handler
 static void *
 ply_reserve(struct ply_parser *ply, size_t size)
 {
-	if (size > ply->workBreak) return NULL;
+	if (ply->workBreak < PLY_MAX_LINE + size) return NULL;
 	ply->workBreak -= size;
 	ply->workBreak &= ~(size_t)0xF;
 	void *pointer = ply->workArea + ply->workBreak;
@@ -540,52 +540,6 @@ ply_read_datum_ascii(const char *str, enum ply_type type, union ply_datum *datum
 }
 
 static int
-ply_read_datum_le(const char *raw, enum ply_type type, union ply_datum *datum)
-{
-	uint64_t q;
-	switch (type) {
-	case PLY_TYPE_INT8:
-		datum->i  = (int32_t)raw[0];
-		break;
-
-	case PLY_TYPE_UINT8:
-		datum->u  = (uint32_t)raw[0];
-		break;
-
-	case PLY_TYPE_INT16:
-		datum->i  = (int32_t)raw[0] << 0;
-		datum->i |= (int32_t)raw[1] << 8;
-		break;
-
-	case PLY_TYPE_UINT16:
-		datum->u  = (uint32_t)raw[0] << 0;
-		datum->u |= (uint32_t)raw[1] << 8;
-		break;
-
-	case PLY_TYPE_INT32:
-	case PLY_TYPE_UINT32:
-	case PLY_TYPE_FLOAT32:
-		datum->u  = (uint32_t)raw[0] <<  0;
-		datum->u |= (uint32_t)raw[1] <<  8;
-		datum->u |= (uint32_t)raw[2] << 16;
-		datum->u |= (uint32_t)raw[3] << 24;
-		break;
-	
-	case PLY_TYPE_FLOAT64:
-		q  = (uint32_t)raw[0] <<  0;
-		q |= (uint32_t)raw[1] <<  8;
-		q |= (uint32_t)raw[2] << 16;
-		q |= (uint32_t)raw[3] << 24;
-		datum->d = (double)q;
-		break;
-	
-	default:
-		return PLY_ERR_INTERNAL;
-	}
-	return 0;
-}
-
-static int
 ply_parse_tuple_ascii(struct ply_parser *ply, const struct ply_element *element, uint32_t tupleIndex)
 {
 	if (ply->handler->startTuple) {
@@ -692,6 +646,55 @@ ply_parse_contents_ascii(struct ply_parser *ply)
 }
 
 static int
+ply_read_datum_le(const unsigned char *raw, enum ply_type type, union ply_datum *datum)
+{
+	uint64_t q;
+	switch (type) {
+	case PLY_TYPE_INT8:
+		datum->i  = (int32_t)raw[0];
+		return 1;
+
+	case PLY_TYPE_UINT8:
+		datum->u  = (uint32_t)raw[0];
+		return 1;
+
+	case PLY_TYPE_INT16:
+		datum->i  = (int32_t)raw[0] << 0;
+		datum->i |= (int32_t)raw[1] << 8;
+		return 2;
+
+	case PLY_TYPE_UINT16:
+		datum->u  = (uint32_t)raw[0] << 0;
+		datum->u |= (uint32_t)raw[1] << 8;
+		return 2;
+
+	case PLY_TYPE_INT32:
+	case PLY_TYPE_UINT32:
+	case PLY_TYPE_FLOAT32:
+		datum->u  = (uint32_t)raw[0] <<  0;
+		datum->u |= (uint32_t)raw[1] <<  8;
+		datum->u |= (uint32_t)raw[2] << 16;
+		datum->u |= (uint32_t)raw[3] << 24;
+		return 4;
+	
+	case PLY_TYPE_FLOAT64:
+		q  = (uint64_t)raw[0] <<  0;
+		q |= (uint64_t)raw[1] <<  8;
+		q |= (uint64_t)raw[2] << 16;
+		q |= (uint64_t)raw[3] << 24;
+		q |= (uint64_t)raw[4] << 32;
+		q |= (uint64_t)raw[5] << 40;
+		q |= (uint64_t)raw[6] << 48;
+		q |= (uint64_t)raw[7] << 56;
+		datum->d = (double)q;
+		return 8;
+	
+	default:
+		return PLY_ERR_INTERNAL;
+	}
+}
+
+static int
 ply_parse_tuple_binary(struct ply_parser *ply, const struct ply_element *element, uint32_t tupleIndex)
 {
 	// FIXME make sure we don't run over the end of the line buffer when calling ply_read_datum_le!
@@ -705,9 +708,9 @@ ply_parse_tuple_binary(struct ply_parser *ply, const struct ply_element *element
 	while (property) {
 		if (property->isList) {
 			union ply_datum indexDatum;
-			int r = ply_read_datum_le(ply->line + offset, property->indexType, &indexDatum);
+			int r = ply_read_datum_le((unsigned char *)ply->line + offset, property->indexType, &indexDatum);
 			if (r < 0) return r;
-			r += offset;
+			offset += r;
 
 			unsigned listLength;
 			switch (property->indexType) {
@@ -725,9 +728,9 @@ ply_parse_tuple_binary(struct ply_parser *ply, const struct ply_element *element
 
 			for (unsigned i = 0; i < listLength; i++) {
 				union ply_datum datum;
-				r = ply_read_datum_le(ply->line + offset, property->dataType, &datum);
+				r = ply_read_datum_le((unsigned char *)ply->line + offset, property->dataType, &datum);
 				if (r < 0) return r;
-				r += offset;
+				offset += r;
 
 				if (ply->handler->onListItem) {
 					ply->handler->onListItem(ply->handler->userdata, datum);
@@ -739,9 +742,9 @@ ply_parse_tuple_binary(struct ply_parser *ply, const struct ply_element *element
 			}
 		} else {
 			union ply_datum datum;
-			int r = ply_read_datum_le(ply->line + offset, property->dataType, &datum);
+			int r = ply_read_datum_le((unsigned char *)ply->line + offset, property->dataType, &datum);
 			if (r < 0) return r;
-			r += offset;
+			offset += r;
 
 			if (ply->handler->onDatum) {
 				ply->handler->onDatum(ply->handler->userdata, property, datum);
