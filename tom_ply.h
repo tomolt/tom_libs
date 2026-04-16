@@ -18,7 +18,7 @@
 #define PLY_ERR_SYNTAX   -400
 #define PLY_ERR_INTERNAL -500
 
-typedef int (*ply_read_cb)(void *readData, void *buffer, unsigned max);
+typedef int (*ply_read_callback)(void *readData, void *buffer, unsigned max);
 
 enum ply_type {
 	PLY_TYPE_INT8,
@@ -38,15 +38,18 @@ union ply_datum {
 	double   d;
 };
 
+typedef const struct ply_property *PLY_PROPERTY;
+typedef const struct ply_element  *PLY_ELEMENT;
+
 struct ply_handler {
-	bool (*startElement)(void *userdata, const char *name);
+	bool (*startElement)(void *userdata, PLY_ELEMENT element);
 	bool (*endElement)(void *userdata);
-	bool (*startTuple)(void *userdata);
+	bool (*startTuple)(void *userdata, unsigned long tupleIndex);
 	bool (*endTuple)(void *userdata);
-	bool (*startList)(void *userdata, uint32_t length, enum ply_type itemType);
+	bool (*onDatum)(void *userdata, PLY_PROPERTY property, union ply_datum value);
+	bool (*startList)(void *userdata, PLY_PROPERTY property, uint32_t length);
 	bool (*endList)(void *userdata);
 	bool (*onListItem)(void *userdata, union ply_datum value);
-	bool (*onDatum)(void *userdata, enum ply_type type, union ply_datum value);
 	void *userdata;
 };
 
@@ -62,13 +65,15 @@ struct ply_property {
 	char                  name[PLY_MAX_NAME];
 	enum ply_type         indexType;
 	enum ply_type         dataType;
-	int                   isList;
+	unsigned char         isList;
 };
 
 struct ply_element {
 	struct ply_element   *next;
 	char                  name[PLY_MAX_NAME];
 	unsigned long         numTuples;
+	//TODO count properties in elements
+	//unsigned long         numProperties;
 	struct ply_property  *properties;
 };
 
@@ -77,26 +82,63 @@ struct ply_parser {
 	struct ply_element   *elements;
 	struct ply_element  **elementsTail;
 	struct ply_property **propertiesTail;
-	char *workArea;
+	unsigned long         numElements;
+
+	char  *workArea;
 	size_t workSize;
 	size_t workBreak;
-	ply_read_cb readFunc;
-	void *readData;
-	struct ply_handler handler;
+
+	ply_read_callback readFunc;
+	void             *readData;
+
+	const struct ply_handler *handler;
+
+	// TODO fold this into the workArea
 	char line[PLY_MAX_LINE];
 	unsigned lineLength;
 };
 
-extern const char *ply_type_names[];
-extern unsigned ply_type_sizes[];
+static inline const char *
+ply_property_get_name(PLY_PROPERTY property) { return property->name; }
 
-const char *ply_strerror(int status);
-int ply_parse_header(struct ply_parser *ply);
-struct ply_element  *ply_get_element_by_name(const struct ply_parser *ply, const char *name);
-struct ply_property *ply_get_property_by_name(const struct ply_element *element, const char *name);
-int ply_parse_contents(struct ply_parser *ply);
-union ply_datum ply_cast(enum ply_type desiredType, enum ply_type dataType, union ply_datum datum);
-union ply_datum ply_cast_normalized(enum ply_type desiredType, enum ply_type dataType, union ply_datum datum);
+static inline enum ply_type
+ply_property_get_index_type(PLY_PROPERTY property) { return property->indexType; }
+
+static inline enum ply_type
+ply_property_get_data_type(PLY_PROPERTY property) { return property->dataType; }
+
+static inline const char *
+ply_element_get_name(PLY_ELEMENT element) { return element->name; }
+
+static inline unsigned long
+ply_element_get_tuple_count(PLY_ELEMENT element) { return element->numTuples; }
+
+static inline unsigned long
+ply_parser_get_element_count(struct ply_parser *ply) { return ply->numElements; }
+
+static inline enum ply_format
+ply_parser_get_format(struct ply_parser *ply) { return ply->format; }
+
+extern const char   *ply_type_names[];
+extern unsigned      ply_type_sizes[];
+
+const char          *ply_strerror(int status);
+
+void                 ply_parser_reset(struct ply_parser *ply);
+void                 ply_parser_set_input(struct ply_parser *ply, ply_read_callback readFunc, void *readData);
+void                 ply_parser_set_work_area(struct ply_parser *ply, void *workArea, size_t workSize);
+void                 ply_parser_set_handler(struct ply_parser *ply, const struct ply_handler *handler);
+
+int                  ply_parse_header(struct ply_parser *ply);
+int                  ply_parse_contents(struct ply_parser *ply);
+
+PLY_PROPERTY         ply_element_get_property(PLY_ELEMENT element, unsigned long propertyIndex);
+PLY_PROPERTY         ply_element_get_property_by_name(PLY_ELEMENT element, const char *name);
+PLY_ELEMENT          ply_parser_get_element(struct ply_parser *ply, unsigned long elementIndex);
+PLY_ELEMENT          ply_parser_get_element_by_name(const struct ply_parser *ply, const char *name);
+
+union ply_datum      ply_cast(enum ply_type desiredType, enum ply_type dataType, union ply_datum datum);
+union ply_datum      ply_cast_normalized(enum ply_type desiredType, enum ply_type dataType, union ply_datum datum);
 
 #endif
 
@@ -146,6 +188,45 @@ ply_strerror(int status)
 	case PLY_ERR_INTERNAL: return "Parser State Inconsistency";
 	default:               return "";
 	}
+}
+
+void
+ply_parser_reset(struct ply_parser *ply)
+{
+	ply->format = PLY_FORMAT_UNKNOWN;
+	ply->elements = NULL;
+	ply->elementsTail = NULL;
+	ply->propertiesTail = NULL;
+	ply->numElements = 0;
+	ply->lineLength = 0;
+
+	ply->workBreak  = ply->workSize;
+	ply->workBreak &= ~(size_t)0xF;
+}
+
+void
+ply_parser_set_input(struct ply_parser *ply, ply_read_callback readFunc, void *readData)
+{
+	ply->readFunc = readFunc;
+	ply->readData = readData;
+
+	ply->lineLength = 0;
+}
+
+void
+ply_parser_set_work_area(struct ply_parser *ply, void *workArea, size_t workSize)
+{
+	ply->workArea   = workArea;
+	ply->workSize   = workSize;
+
+	ply->workBreak  = ply->workSize;
+	ply->workBreak &= ~(size_t)0xF;
+}
+
+void
+ply_parser_set_handler(struct ply_parser *ply, const struct ply_handler *handler)
+{
+	ply->handler = handler;
 }
 
 static void *
@@ -236,6 +317,7 @@ ply_parse_element(struct ply_parser *ply, char **tokenState)
 	*ply->elementsTail = element;
 	ply->elementsTail = &element->next;
 	ply->propertiesTail = &element->properties;
+	ply->numElements++;
 
 	return 0;
 }
@@ -331,6 +413,7 @@ ply_parse_header(struct ply_parser *ply)
 	ply->elements = NULL;
 	ply->elementsTail = &ply->elements;
 	ply->propertiesTail = NULL;
+	ply->numElements = 0;
 
 	for (;;) {
 		int r = ply->readFunc(ply->readData,
@@ -354,21 +437,19 @@ ply_parse_header(struct ply_parser *ply)
 	return 0;
 }
 
-struct ply_element *
-ply_get_element_by_name(const struct ply_parser *ply, const char *name)
+PLY_PROPERTY
+ply_element_get_property(PLY_ELEMENT element, unsigned long propertyIndex)
 {
-	struct ply_element *element = ply->elements;
-	while (element) {
-		if (!strcmp(element->name, name)) {
-			return element;
-		}
-		element = element->next;
+	struct ply_property *property = element->properties;
+	for (unsigned long i = 0; i < propertyIndex; i++) {
+		if (!property) return NULL;
+		property = property->next;
 	}
-	return NULL;
+	return property;
 }
 
-struct ply_property *
-ply_get_property_by_name(const struct ply_element *element, const char *name)
+PLY_PROPERTY
+ply_element_get_property_by_name(PLY_ELEMENT element, const char *name)
 {
 	struct ply_property *property = element->properties;
 	while (property) {
@@ -376,6 +457,28 @@ ply_get_property_by_name(const struct ply_element *element, const char *name)
 			return property;
 		}
 		property = property->next;
+	}
+	return NULL;
+}
+
+PLY_ELEMENT
+ply_parser_get_element(struct ply_parser *ply, unsigned long elementIndex)
+{
+	const struct ply_element *element = ply->elements;
+	for (unsigned long i = 0; i < elementIndex; i++) {
+		if (!element) return NULL;
+		element = element->next;
+	}
+	return element;
+}
+
+PLY_ELEMENT
+ply_parser_get_element_by_name(const struct ply_parser *ply, const char *name)
+{
+	const struct ply_element *element = ply->elements;
+	while (element) {
+		if (!strcmp(element->name, name)) return element;
+		element = element->next;
 	}
 	return NULL;
 }
@@ -433,7 +536,7 @@ ply_read_datum_ascii(const char *str, enum ply_type type, union ply_datum *datum
 	return 0;
 }
 
-static int
+int
 ply_read_datum_le(const char *raw, enum ply_type type, union ply_datum *datum)
 {
 	uint64_t q;
@@ -479,7 +582,7 @@ ply_read_datum_le(const char *raw, enum ply_type type, union ply_datum *datum)
 	return 0;
 }
 
-static int
+int
 ply_read_datum(enum ply_format format, const char *raw, enum ply_type type, union ply_datum *datum)
 {
 	switch (format) {
@@ -496,8 +599,8 @@ ply_parse_contents_ascii(struct ply_parser *ply)
 {
 	const struct ply_element *element = ply->elements;
 	while (element) {
-		if (ply->handler.startElement) {
-			ply->handler.startElement(ply->handler.userdata, element->name);
+		if (ply->handler->startElement) {
+			ply->handler->startElement(ply->handler->userdata, element);
 		}
 
 		for (unsigned long t = 0; t < element->numTuples; t++) {
@@ -512,8 +615,8 @@ ply_parse_contents_ascii(struct ply_parser *ply)
 			char *tokenState = ply->line;
 			char *token;
 
-			if (ply->handler.startTuple) {
-				ply->handler.startTuple(ply->handler.userdata);
+			if (ply->handler->startTuple) {
+				ply->handler->startTuple(ply->handler->userdata, t);
 			}
 
 			const struct ply_property *property = element->properties;
@@ -528,18 +631,14 @@ ply_parse_contents_ascii(struct ply_parser *ply)
 
 					unsigned length;
 					switch (property->indexType) {
-					case PLY_TYPE_INT8:
-					case PLY_TYPE_INT16:
-					case PLY_TYPE_INT32:
+					case PLY_TYPE_INT_:
 						if (indexDatum.i < 0) {
 							return PLY_ERR_SYNTAX;
 						}
 						length = (unsigned)indexDatum.i;
 						break;
 
-					case PLY_TYPE_UINT8:
-					case PLY_TYPE_UINT16:
-					case PLY_TYPE_UINT32:
+					case PLY_TYPE_UINT_:
 						length = indexDatum.u;
 						break;
 
@@ -547,9 +646,9 @@ ply_parse_contents_ascii(struct ply_parser *ply)
 						return PLY_ERR_SYNTAX;
 					}
 
-					if (ply->handler.startList) {
-						ply->handler.startList(ply->handler.userdata,
-							length, property->dataType);
+					if (ply->handler->startList) {
+						ply->handler->startList(ply->handler->userdata,
+							property, length);
 					}
 
 					for (unsigned i = 0; i < length; i++) {
@@ -560,21 +659,21 @@ ply_parse_contents_ascii(struct ply_parser *ply)
 						r = ply_read_datum_ascii(token, property->dataType, &datum);
 						if (r < 0) return r;
 
-						if (ply->handler.onListItem) {
-							ply->handler.onListItem(ply->handler.userdata, datum);
+						if (ply->handler->onListItem) {
+							ply->handler->onListItem(ply->handler->userdata, datum);
 						}
 					}
 
-					if (ply->handler.endList) {
-						ply->handler.endList(ply->handler.userdata);
+					if (ply->handler->endList) {
+						ply->handler->endList(ply->handler->userdata);
 					}
 				} else {
 					union ply_datum datum;
 					r = ply_read_datum_ascii(token, property->dataType, &datum);
 					if (r < 0) return r;
 
-					if (ply->handler.onDatum) {
-						ply->handler.onDatum(ply->handler.userdata, property->dataType, datum);
+					if (ply->handler->onDatum) {
+						ply->handler->onDatum(ply->handler->userdata, property, datum);
 					}
 				}
 
@@ -584,16 +683,16 @@ ply_parse_contents_ascii(struct ply_parser *ply)
 			token = ply_next_token(&tokenState, ' ');
 			if (token) return PLY_ERR_SYNTAX;
 
-			if (ply->handler.endTuple) {
-				ply->handler.endTuple(ply->handler.userdata);
+			if (ply->handler->endTuple) {
+				ply->handler->endTuple(ply->handler->userdata);
 			}
 
 			ply->lineLength -= nl + 1 - ply->line;
 			memmove(ply->line, nl + 1, ply->lineLength);
 		}
 
-		if (ply->handler.endElement) {
-			ply->handler.endElement(ply->handler.userdata);
+		if (ply->handler->endElement) {
+			ply->handler->endElement(ply->handler->userdata);
 		}
 
 		element = element->next;
