@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#define PLY_MAX_LINE 1024
 #define PLY_MAX_NAME 32
 
 #define PLY_ERR_SPACE    -100
@@ -71,8 +72,6 @@ struct ply_element {
 	struct ply_property  *properties;
 };
 
-#define PLY_MAX_LINE 1024
-
 struct ply_parser {
 	enum ply_format       format;
 	struct ply_element   *elements;
@@ -88,6 +87,15 @@ struct ply_parser {
 	unsigned lineLength;
 };
 
+extern const char *ply_type_names[];
+extern unsigned ply_type_sizes[];
+
+const char *ply_strerror(int status);
+int ply_parse_header(struct ply_parser *ply);
+struct ply_element  *ply_get_element_by_name(const struct ply_parser *ply, const char *name);
+struct ply_property *ply_get_property_by_name(const struct ply_element *element, const char *name);
+int ply_parse_contents(struct ply_parser *ply);
+
 #endif
 
 #ifdef PLY_IMPLEMENTATION
@@ -95,7 +103,7 @@ struct ply_parser {
 #include <stdlib.h>
 #include <string.h>
 
-static const char *ply_type_names[] = {
+const char *ply_type_names[] = {
 	"int8",    "char",
 	"uint8",   "uchar",
 	"int16",   "short",
@@ -107,7 +115,7 @@ static const char *ply_type_names[] = {
 	NULL
 };
 
-static unsigned ply_type_sizes[] = {
+unsigned ply_type_sizes[] = {
 	1,
 	1,
 	2,
@@ -131,7 +139,7 @@ ply_strerror(int status)
 	}
 }
 
-void *
+static void *
 ply_reserve(struct ply_parser *ply, size_t size)
 {
 	if (size > ply->workBreak) return NULL;
@@ -142,7 +150,7 @@ ply_reserve(struct ply_parser *ply, size_t size)
 	return pointer;
 }
 
-char *
+static char *
 ply_next_token(char **strPtr, int delim)
 {
 	char *start = *strPtr;
@@ -160,7 +168,7 @@ ply_next_token(char **strPtr, int delim)
 	return *start ? start : NULL;
 }
 
-int
+static int
 ply_parse_type(const char *str, enum ply_type *type)
 {
 	for (size_t i = 0; ply_type_names[i]; i++) {
@@ -172,7 +180,7 @@ ply_parse_type(const char *str, enum ply_type *type)
 	return PLY_ERR_SYNTAX;
 }
 
-int
+static int
 ply_parse_format(struct ply_parser *ply, char **tokenState)
 {
 	char *token;
@@ -197,7 +205,7 @@ ply_parse_format(struct ply_parser *ply, char **tokenState)
 	return 0;
 }
 
-int
+static int
 ply_parse_element(struct ply_parser *ply, char **tokenState)
 {
 	struct ply_element *element = ply_reserve(ply, sizeof *element);
@@ -223,7 +231,7 @@ ply_parse_element(struct ply_parser *ply, char **tokenState)
 	return 0;
 }
 
-int
+static int
 ply_parse_property(struct ply_parser *ply, char **tokenState)
 {
 	if (!ply->propertiesTail) return PLY_ERR_SYNTAX;
@@ -266,7 +274,7 @@ ply_parse_property(struct ply_parser *ply, char **tokenState)
 	return 0;
 }
 
-int
+static int
 ply_parse_header_line(struct ply_parser *ply, char *line)
 {
 	char *tokenState = line;
@@ -363,7 +371,7 @@ ply_get_property_by_name(const struct ply_element *element, const char *name)
 	return NULL;
 }
 
-int
+static int
 ply_read_datum_ascii(const char *str, enum ply_type type, union ply_datum *datum)
 {
 	char *end;
@@ -416,7 +424,7 @@ ply_read_datum_ascii(const char *str, enum ply_type type, union ply_datum *datum
 	return 0;
 }
 
-int
+static int
 ply_read_datum_le(const char *raw, enum ply_type type, union ply_datum *datum)
 {
 	uint64_t q;
@@ -493,7 +501,7 @@ ply_read_datum_reversed(const char *raw, enum ply_type type, union ply_datum *da
 }
 #endif
 
-int
+static int
 ply_read_datum(enum ply_format format, const char *raw, enum ply_type type, union ply_datum *datum)
 {
 	switch (format) {
@@ -506,7 +514,7 @@ ply_read_datum(enum ply_format format, const char *raw, enum ply_type type, unio
 }
 
 int
-ply_parse_contents(struct ply_parser *ply)
+ply_parse_contents_ascii(struct ply_parser *ply)
 {
 	const struct ply_element *element = ply->elements;
 	while (element) {
@@ -614,6 +622,18 @@ ply_parse_contents(struct ply_parser *ply)
 	}
 
 	return 0;
+}
+
+int
+ply_parse_contents(struct ply_parser *ply)
+{
+	switch (ply->format) {
+	case PLY_FORMAT_ASCII:
+		return ply_parse_contents_ascii(ply);
+	
+	default:
+		return PLY_ERR_INTERNAL;
+	}
 }
 
 #if 0
