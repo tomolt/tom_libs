@@ -11,33 +11,13 @@
 
 #define PLY_MAX_NAME 32
 
-#define PLY_ERR_SPACE  -100
-#define PLY_ERR_LIMIT  -200
-#define PLY_ERR_READ   -300
-#define PLY_ERR_SYNTAX -400
+#define PLY_ERR_SPACE    -100
+#define PLY_ERR_LIMIT    -200
+#define PLY_ERR_READ     -300
+#define PLY_ERR_SYNTAX   -400
+#define PLY_ERR_INTERNAL -500
 
 typedef int (*ply_read_cb)(void *readData, void *buffer, unsigned max);
-
-struct ply_handler {
-	bool (*startElement)(void *userdata, const char *name);
-	bool (*endElement)(void *userdata);
-	bool (*startTuple)(void *userdata);
-	bool (*endTuple)(void *userdata);
-	bool (*startList)(void *userdata, uint32_t length);
-	bool (*endList)(void *userdata);
-	bool (*onSignedInt)(void *userdata, int32_t value);
-	bool (*onUnsignedInt)(void *userdata, uint32_t value);
-	bool (*onFloat)(void *userdata, float value);
-	bool (*onDouble)(void *userdata, double value);
-	void *userdata;
-};
-
-enum ply_format {
-	PLY_FORMAT_UNKNOWN = 0,
-	PLY_FORMAT_ASCII,
-	PLY_FORMAT_BINARY_LITTLE_ENDIAN,
-	PLY_FORMAT_BINARY_BIG_ENDIAN,
-};
 
 enum ply_type {
 	PLY_TYPE_INT8,
@@ -48,6 +28,31 @@ enum ply_type {
 	PLY_TYPE_UINT32,
 	PLY_TYPE_FLOAT32,
 	PLY_TYPE_FLOAT64,
+};
+
+union ply_datum {
+	int32_t  i;
+	uint32_t u;
+	float    f;
+	double   d;
+};
+
+struct ply_handler {
+	bool (*startElement)(void *userdata, const char *name);
+	bool (*endElement)(void *userdata);
+	bool (*startTuple)(void *userdata);
+	bool (*endTuple)(void *userdata);
+	bool (*startList)(void *userdata, uint32_t length);
+	bool (*endList)(void *userdata);
+	bool (*onDatum)(void *userdata, enum ply_type type, union ply_datum value);
+	void *userdata;
+};
+
+enum ply_format {
+	PLY_FORMAT_UNKNOWN = 0,
+	PLY_FORMAT_ASCII,
+	PLY_FORMAT_BINARY_LITTLE_ENDIAN,
+	PLY_FORMAT_BINARY_BIG_ENDIAN,
 };
 
 struct ply_property {
@@ -80,18 +85,6 @@ struct ply_parser {
 	struct ply_handler handler;
 	char line[PLY_MAX_LINE];
 	unsigned lineLength;
-};
-
-union ply_datum {
-	int8_t   i8;
-	uint8_t  u8;
-	int16_t  i16;
-	uint16_t u16;
-	int32_t  i32;
-	uint32_t u32;
-	float    f32;
-	double   f64;
-	char     raw[8];
 };
 
 #endif
@@ -128,11 +121,12 @@ const char *
 ply_strerror(int status)
 {
 	switch (status) {
-	case PLY_ERR_SPACE:  return "Not Enough Space";
-	case PLY_ERR_LIMIT:  return "Internal Limit Exceeded";
-	case PLY_ERR_READ:   return "I/O Read Error";
-	case PLY_ERR_SYNTAX: return "Syntax Error";
-	default:             return "";
+	case PLY_ERR_SPACE:    return "Not Enough Space";
+	case PLY_ERR_LIMIT:    return "Internal Limit Exceeded";
+	case PLY_ERR_READ:     return "I/O Read Error";
+	case PLY_ERR_SYNTAX:   return "Syntax Error";
+	case PLY_ERR_INTERNAL: return "Parser State Inconsistency";
+	default:               return "";
 	}
 }
 
@@ -368,60 +362,108 @@ int
 ply_read_datum_ascii(const char *str, enum ply_type type, union ply_datum *datum)
 {
 	char *end;
-	long l;
-	unsigned long u;
 	switch (type) {
 	case PLY_TYPE_INT8:
-		l = strtol(str, &end, 10);
-		if (l < INT8_MIN) return PLY_ERR_SYNTAX;
-		if (l > INT8_MAX) return PLY_ERR_SYNTAX;
-		datum->i8 = (int8_t)l;
+		datum->i = strtol(str, &end, 10);
+		if (datum->i < INT8_MIN) return PLY_ERR_SYNTAX;
+		if (datum->i > INT8_MAX) return PLY_ERR_SYNTAX;
 		break;
 
 	case PLY_TYPE_UINT8:
-		u = strtoul(str, &end, 10);
-		if (u > UINT8_MAX) return PLY_ERR_SYNTAX;
-		datum->u8 = (uint8_t)u;
+		datum->u = strtoul(str, &end, 10);
+		if (datum->u > UINT8_MAX) return PLY_ERR_SYNTAX;
 		break;
 
 	case PLY_TYPE_INT16:
-		l = strtol(str, &end, 10);
-		if (l < INT16_MIN) return PLY_ERR_SYNTAX;
-		if (l > INT16_MAX) return PLY_ERR_SYNTAX;
-		datum->i16 = (int16_t)l;
+		datum->i = strtol(str, &end, 10);
+		if (datum->i < INT16_MIN) return PLY_ERR_SYNTAX;
+		if (datum->i > INT16_MAX) return PLY_ERR_SYNTAX;
 		break;
 
 	case PLY_TYPE_UINT16:
-		u = strtoul(str, &end, 10);
-		if (u > UINT16_MAX) return PLY_ERR_SYNTAX;
-		datum->u16 = (uint16_t)u;
+		datum->u = strtoul(str, &end, 10);
+		if (datum->u > UINT16_MAX) return PLY_ERR_SYNTAX;
 		break;
 
 	case PLY_TYPE_INT32:
-		l = strtol(str, &end, 10);
-		if (l < INT32_MIN) return PLY_ERR_SYNTAX;
-		if (l > INT32_MAX) return PLY_ERR_SYNTAX;
-		datum->i32 = (int32_t)l;
+		datum->i = strtol(str, &end, 10);
+		if (datum->i < INT32_MIN) return PLY_ERR_SYNTAX;
+		if (datum->i > INT32_MAX) return PLY_ERR_SYNTAX;
 		break;
 
 	case PLY_TYPE_UINT32:
-		u = strtoul(str, &end, 10);
-		if (u > UINT32_MAX) return PLY_ERR_SYNTAX;
-		datum->u32 = (uint32_t)u;
+		datum->u = strtoul(str, &end, 10);
+		if (datum->u > UINT32_MAX) return PLY_ERR_SYNTAX;
 		break;
 	
 	case PLY_TYPE_FLOAT32:
-		datum->f32 = strtof(str, &end);
+		datum->f = strtof(str, &end);
 		break;
 
 	case PLY_TYPE_FLOAT64:
-		datum->f64 = strtod(str, &end);
+		datum->d = strtod(str, &end);
 		break;
+	
+	default:
+		return PLY_ERR_INTERNAL;
 	}
 	if (*end) return PLY_ERR_SYNTAX;
 	return 0;
 }
 
+int
+ply_read_datum_le(const char *raw, enum ply_type type, union ply_datum *datum)
+{
+	uint64_t q;
+	switch (type) {
+	case PLY_TYPE_INT8:
+		datum->i  = raw[0];
+		break;
+
+	case PLY_TYPE_INT16:
+		datum->i  = (int32_t)raw[0] << 0;
+		datum->i |= (int32_t)raw[1] << 8;
+		break;
+
+	case PLY_TYPE_INT32:
+		datum->i  = (int32_t)raw[0] <<  0;
+		datum->i |= (int32_t)raw[1] <<  8;
+		datum->i |= (int32_t)raw[2] << 16;
+		datum->i |= (int32_t)raw[3] << 24;
+		break;
+
+	case PLY_TYPE_UINT8:
+		datum->u  = (uint32_t)raw[0];
+		break;
+
+	case PLY_TYPE_UINT16:
+		datum->u  = (uint32_t)raw[0] << 0;
+		datum->u |= (uint32_t)raw[1] << 8;
+		break;
+
+	case PLY_TYPE_UINT32:
+	case PLY_TYPE_FLOAT32:
+		datum->u  = (uint32_t)raw[0] <<  0;
+		datum->u |= (uint32_t)raw[1] <<  8;
+		datum->u |= (uint32_t)raw[2] << 16;
+		datum->u |= (uint32_t)raw[3] << 24;
+		break;
+	
+	case PLY_TYPE_FLOAT64:
+		q  = (uint32_t)raw[0] <<  0;
+		q |= (uint32_t)raw[1] <<  8;
+		q |= (uint32_t)raw[2] << 16;
+		q |= (uint32_t)raw[3] << 24;
+		datum->d = (double)q;
+		break;
+	
+	default:
+		return PLY_ERR_INTERNAL;
+	}
+	return 0;
+}
+
+#if 0
 int
 ply_read_datum_native(const char *raw, enum ply_type type, union ply_datum *datum)
 {
@@ -444,6 +486,7 @@ ply_read_datum_reversed(const char *raw, enum ply_type type, union ply_datum *da
 	}
 	return 0;
 }
+#endif
 
 int
 ply_read_datum(enum ply_format format, const char *raw, enum ply_type type, union ply_datum *datum)
@@ -493,7 +536,7 @@ ply_parse_contents(struct ply_parser *ply)
 					if (r < 0) return r;
 
 					if (ply->handler.startList) {
-						ply->handler.startList(ply->handler.userdata, datum.u32); // TODO
+						ply->handler.startList(ply->handler.userdata, datum.u); // TODO
 					}
 
 					if (ply->handler.endList) {
@@ -504,34 +547,8 @@ ply_parse_contents(struct ply_parser *ply)
 					r = ply_read_datum_ascii(token, property->dataType, &datum);
 					if (r < 0) return r;
 
-					switch (property->dataType) {
-					case PLY_TYPE_INT8:
-					case PLY_TYPE_INT16:
-					case PLY_TYPE_INT32:
-						if (ply->handler.onSignedInt) {
-							ply->handler.onSignedInt(ply->handler.userdata, datum.i32); // TODO
-						}
-						break;
-
-					case PLY_TYPE_UINT8:
-					case PLY_TYPE_UINT16:
-					case PLY_TYPE_UINT32:
-						if (ply->handler.onUnsignedInt) {
-							ply->handler.onUnsignedInt(ply->handler.userdata, datum.u32); // TODO
-						}
-						break;
-
-					case PLY_TYPE_FLOAT32:
-						if (ply->handler.onFloat) {
-							ply->handler.onFloat(ply->handler.userdata, datum.f32);
-						}
-						break;
-
-					case PLY_TYPE_FLOAT64:
-						if (ply->handler.onDouble) {
-							ply->handler.onDouble(ply->handler.userdata, datum.f64);
-						}
-						break;
+					if (ply->handler.onDatum) {
+						ply->handler.onDatum(ply->handler.userdata, property->dataType, datum);
 					}
 				}
 
@@ -555,5 +572,34 @@ ply_parse_contents(struct ply_parser *ply)
 
 	return 0;
 }
+
+#if 0
+union ply_datum
+ply_cast(enum ply_type desiredType, enum ply_type dataType, union ply_datum datum)
+{
+	union ply_datum castDatum;
+	switch (desiredType) {
+	case PLY_TYPE_INT32:
+		switch (dataType) {
+		case PLY_TYPE_FLOAT:
+			castDatum.i = (int32_t)datum.f;
+			break;
+		}
+		break;
+	}
+}
+#endif
+
+/*
+
+Concept for stream-based API:
+
+ply_next_element();
+
+ply_next_tuple();
+
+
+
+ */
 
 #endif

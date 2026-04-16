@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <stdio.h>
+#include <inttypes.h>
 
 #define PLY_IMPLEMENTATION
 #include <tom_ply.h>
@@ -43,10 +44,30 @@ start_list(void *userdata, unsigned length)
 }
 
 bool
-on_float(void *userdata, float value)
+on_datum(void *userdata, enum ply_type type, union ply_datum datum)
 {
 	(void)userdata;
-	printf("    FLOAT %f\n", value);
+	switch (type) {
+	case PLY_TYPE_INT8:
+	case PLY_TYPE_INT16:
+	case PLY_TYPE_INT32:
+		printf("    I %"PRId32"\n", datum.i);
+		break;
+
+	case PLY_TYPE_UINT8:
+	case PLY_TYPE_UINT16:
+	case PLY_TYPE_UINT32:
+		printf("    U %"PRIu32"\n", datum.u);
+		break;
+
+	case PLY_TYPE_FLOAT32:
+		printf("    F %f\n", datum.f);
+		break;
+
+	case PLY_TYPE_FLOAT64:
+		printf("    D %lf\n", datum.d);
+		break;
+	}
 	return true;
 }
 
@@ -95,7 +116,7 @@ main(int argc, const char **argv)
 	ply.handler.startElement = start_element;
 	ply.handler.startTuple = start_tuple;
 	ply.handler.startList = start_list;
-	ply.handler.onFloat = on_float;
+	ply.handler.onDatum = on_datum;
 	s = ply_parse_contents(&ply);
 	if (s < 0) {
 		fclose(plyFile);
