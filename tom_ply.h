@@ -539,7 +539,7 @@ ply_read_datum_ascii(const char *str, enum ply_type type, union ply_datum *datum
 	return 0;
 }
 
-int
+static int
 ply_read_datum_le(const char *raw, enum ply_type type, union ply_datum *datum)
 {
 	uint64_t q;
@@ -585,19 +585,78 @@ ply_read_datum_le(const char *raw, enum ply_type type, union ply_datum *datum)
 	return 0;
 }
 
-int
-ply_read_datum(enum ply_format format, const char *raw, enum ply_type type, union ply_datum *datum)
+static int
+ply_parse_tuple_ascii(struct ply_parser *ply, const struct ply_element *element, uint32_t tupleIndex)
 {
-	switch (format) {
-	case PLY_FORMAT_ASCII:
-		return ply_read_datum_ascii(raw, type, datum);
-	// TODO binary formats
-	default:
-		return -1;
+	if (ply->handler->startTuple) {
+		ply->handler->startTuple(ply->handler->userdata, tupleIndex);
 	}
+
+	char *token, *tokenState = ply->line;
+	const struct ply_property *property = element->properties;
+	while (property) {
+		token = ply_next_token(&tokenState, ' ');
+		if (!token) return PLY_ERR_SYNTAX;
+
+		if (property->isList) {
+			union ply_datum indexDatum;
+			int r = ply_read_datum_ascii(token, property->indexType, &indexDatum);
+			if (r < 0) return r;
+
+			unsigned listLength;
+			switch (property->indexType) {
+			case PLY_TYPE_INT_:
+				if (indexDatum.i < 0) return PLY_ERR_SYNTAX;
+				listLength = (unsigned)indexDatum.i;
+				break;
+			case PLY_TYPE_UINT_: listLength = indexDatum.u; break;
+			default: return PLY_ERR_SYNTAX;
+			}
+
+			if (ply->handler->startList) {
+				ply->handler->startList(ply->handler->userdata, property, listLength);
+			}
+
+			for (unsigned i = 0; i < listLength; i++) {
+				token = ply_next_token(&tokenState, ' ');
+				if (!token) return PLY_ERR_SYNTAX;
+
+				union ply_datum datum;
+				r = ply_read_datum_ascii(token, property->dataType, &datum);
+				if (r < 0) return r;
+
+				if (ply->handler->onListItem) {
+					ply->handler->onListItem(ply->handler->userdata, datum);
+				}
+			}
+
+			if (ply->handler->endList) {
+				ply->handler->endList(ply->handler->userdata);
+			}
+		} else {
+			union ply_datum datum;
+			int r = ply_read_datum_ascii(token, property->dataType, &datum);
+			if (r < 0) return r;
+
+			if (ply->handler->onDatum) {
+				ply->handler->onDatum(ply->handler->userdata, property, datum);
+			}
+		}
+
+		property = property->next;
+	}
+
+	token = ply_next_token(&tokenState, ' ');
+	if (token) return PLY_ERR_SYNTAX;
+
+	if (ply->handler->endTuple) {
+		ply->handler->endTuple(ply->handler->userdata);
+	}
+
+	return 0;
 }
 
-int
+static int
 ply_parse_contents_ascii(struct ply_parser *ply)
 {
 	const struct ply_element *element = ply->elements;
@@ -615,83 +674,109 @@ ply_parse_contents_ascii(struct ply_parser *ply)
 			if (!nl) return PLY_ERR_SYNTAX;
 			*nl = 0;
 
-			char *tokenState = ply->line;
-			char *token;
-
-			if (ply->handler->startTuple) {
-				ply->handler->startTuple(ply->handler->userdata, t);
-			}
-
-			const struct ply_property *property = element->properties;
-			while (property) {
-				token = ply_next_token(&tokenState, ' ');
-				if (!token) return PLY_ERR_SYNTAX;
-
-				if (property->isList) {
-					union ply_datum indexDatum;
-					r = ply_read_datum_ascii(token, property->indexType, &indexDatum);
-					if (r < 0) return r;
-
-					unsigned length;
-					switch (property->indexType) {
-					case PLY_TYPE_INT_:
-						if (indexDatum.i < 0) {
-							return PLY_ERR_SYNTAX;
-						}
-						length = (unsigned)indexDatum.i;
-						break;
-
-					case PLY_TYPE_UINT_:
-						length = indexDatum.u;
-						break;
-
-					default:
-						return PLY_ERR_SYNTAX;
-					}
-
-					if (ply->handler->startList) {
-						ply->handler->startList(ply->handler->userdata,
-							property, length);
-					}
-
-					for (unsigned i = 0; i < length; i++) {
-						token = ply_next_token(&tokenState, ' ');
-						if (!token) return PLY_ERR_SYNTAX;
-
-						union ply_datum datum;
-						r = ply_read_datum_ascii(token, property->dataType, &datum);
-						if (r < 0) return r;
-
-						if (ply->handler->onListItem) {
-							ply->handler->onListItem(ply->handler->userdata, datum);
-						}
-					}
-
-					if (ply->handler->endList) {
-						ply->handler->endList(ply->handler->userdata);
-					}
-				} else {
-					union ply_datum datum;
-					r = ply_read_datum_ascii(token, property->dataType, &datum);
-					if (r < 0) return r;
-
-					if (ply->handler->onDatum) {
-						ply->handler->onDatum(ply->handler->userdata, property, datum);
-					}
-				}
-
-				property = property->next;
-			}
-
-			token = ply_next_token(&tokenState, ' ');
-			if (token) return PLY_ERR_SYNTAX;
-
-			if (ply->handler->endTuple) {
-				ply->handler->endTuple(ply->handler->userdata);
-			}
+			r = ply_parse_tuple_ascii(ply, element, t);
+			if (r < 0) return r;
 
 			ply->lineLength -= nl + 1 - ply->line;
 			memmove(ply->line, nl + 1, ply->lineLength);
+		}
+
+		if (ply->handler->endElement) {
+			ply->handler->endElement(ply->handler->userdata);
+		}
+
+		element = element->next;
+	}
+
+	return 0;
+}
+
+static int
+ply_parse_tuple_binary(struct ply_parser *ply, const struct ply_element *element, uint32_t tupleIndex)
+{
+	// FIXME make sure we don't run over the end of the line buffer when calling ply_read_datum_le!
+	
+	if (ply->handler->startTuple) {
+		ply->handler->startTuple(ply->handler->userdata, tupleIndex);
+	}
+
+	int offset = 0;
+	const struct ply_property *property = element->properties;
+	while (property) {
+		if (property->isList) {
+			union ply_datum indexDatum;
+			int r = ply_read_datum_le(ply->line + offset, property->indexType, &indexDatum);
+			if (r < 0) return r;
+			r += offset;
+
+			unsigned listLength;
+			switch (property->indexType) {
+			case PLY_TYPE_INT_:
+				if (indexDatum.i < 0) return PLY_ERR_SYNTAX;
+				listLength = (unsigned)indexDatum.i;
+				break;
+			case PLY_TYPE_UINT_: listLength = indexDatum.u; break;
+			default: return PLY_ERR_SYNTAX;
+			}
+
+			if (ply->handler->startList) {
+				ply->handler->startList(ply->handler->userdata, property, listLength);
+			}
+
+			for (unsigned i = 0; i < listLength; i++) {
+				union ply_datum datum;
+				r = ply_read_datum_le(ply->line + offset, property->dataType, &datum);
+				if (r < 0) return r;
+				r += offset;
+
+				if (ply->handler->onListItem) {
+					ply->handler->onListItem(ply->handler->userdata, datum);
+				}
+			}
+
+			if (ply->handler->endList) {
+				ply->handler->endList(ply->handler->userdata);
+			}
+		} else {
+			union ply_datum datum;
+			int r = ply_read_datum_le(ply->line + offset, property->dataType, &datum);
+			if (r < 0) return r;
+			r += offset;
+
+			if (ply->handler->onDatum) {
+				ply->handler->onDatum(ply->handler->userdata, property, datum);
+			}
+		}
+
+		property = property->next;
+	}
+
+	if (ply->handler->endTuple) {
+		ply->handler->endTuple(ply->handler->userdata);
+	}
+
+	return offset;
+}
+
+static int
+ply_parse_contents_binary(struct ply_parser *ply)
+{
+	const struct ply_element *element = ply->elements;
+	while (element) {
+		if (ply->handler->startElement) {
+			ply->handler->startElement(ply->handler->userdata, element);
+		}
+
+		for (unsigned long t = 0; t < element->numTuples; t++) {
+			int r = ply->readFunc(ply->readData, ply->line + ply->lineLength, PLY_MAX_LINE - ply->lineLength);
+			if (r < 0) return PLY_ERR_READ;
+			ply->lineLength += (unsigned)r;
+
+			r = ply_parse_tuple_binary(ply, element, t);
+			if (r < 0) return r;
+
+			ply->lineLength -= r;
+			memmove(ply->line, ply->line + r, ply->lineLength);
 		}
 
 		if (ply->handler->endElement) {
@@ -710,6 +795,9 @@ ply_parse_contents(struct ply_parser *ply)
 	switch (ply->format) {
 	case PLY_FORMAT_ASCII:
 		return ply_parse_contents_ascii(ply);
+
+	case PLY_FORMAT_BINARY_LITTLE_ENDIAN:
+		return ply_parse_contents_binary(ply);
 	
 	default:
 		return PLY_ERR_INTERNAL;
@@ -790,11 +878,15 @@ ply_cast_normalized(enum ply_type desiredType, enum ply_type dataType, union ply
 
 Concept for stream-based API:
 
-ply_next_element();
+ply_stream_element();
 
-ply_next_tuple();
+ply_stream_tuple();
 
+ply_stream_datum();
 
+ply_stream_list();
+
+ply_stream_list_item();
 
  */
 
