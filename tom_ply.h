@@ -7,6 +7,7 @@
 #define _TOM_PLY_H_
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #define PLY_MAX_NAME 32
 
@@ -15,7 +16,21 @@
 #define PLY_ERR_READ   -300
 #define PLY_ERR_SYNTAX -400
 
-typedef int (*ply_read_cb)(void *userdata, void *buffer, unsigned max);
+typedef int (*ply_read_cb)(void *readData, void *buffer, unsigned max);
+
+struct ply_handler {
+	bool (*startElement)(void *userdata, const char *name);
+	bool (*endElement)(void *userdata);
+	bool (*startTuple)(void *userdata);
+	bool (*endTuple)(void *userdata);
+	bool (*startList)(void *userdata, uint32_t length);
+	bool (*endList)(void *userdata);
+	bool (*onSignedInt)(void *userdata, int32_t value);
+	bool (*onUnsignedInt)(void *userdata, uint32_t value);
+	bool (*onFloat)(void *userdata, float value);
+	bool (*onDouble)(void *userdata, double value);
+	void *userdata;
+};
 
 enum ply_format {
 	PLY_FORMAT_UNKNOWN = 0,
@@ -50,6 +65,8 @@ struct ply_element {
 	struct ply_property  *properties;
 };
 
+#define PLY_MAX_LINE 1024
+
 struct ply_parser {
 	enum ply_format       format;
 	struct ply_element   *elements;
@@ -58,8 +75,11 @@ struct ply_parser {
 	char *workArea;
 	size_t workSize;
 	size_t workBreak;
-	ply_read_cb read_cb;
-	void *userdata;
+	ply_read_cb readFunc;
+	void *readData;
+	struct ply_handler handler;
+	char line[PLY_MAX_LINE];
+	unsigned lineLength;
 };
 
 union ply_datum {
@@ -281,19 +301,15 @@ ply_parse_header_line(struct ply_parser *ply, char *line)
 int
 ply_parse_header(struct ply_parser *ply)
 {
-	const unsigned maxLine = 1024;
-	char line[maxLine];
-	unsigned length;
-
-	int r = ply->read_cb(ply->userdata, line, maxLine);
+	int r = ply->readFunc(ply->readData, ply->line, PLY_MAX_LINE);
 	if (r < 0) return PLY_ERR_READ;
-	length = (unsigned)r;
+	ply->lineLength = (unsigned)r;
 
-	if (length < 4 || !!memcmp(line, "ply\n", 4)) {
+	if (ply->lineLength < 4 || !!memcmp(ply->line, "ply\n", 4)) {
 		return PLY_ERR_SYNTAX;
 	}
-	length -= 4;
-	memmove(line, line + 4, length);
+	ply->lineLength -= 4;
+	memmove(ply->line, ply->line + 4, ply->lineLength);
 
 	ply->format = PLY_FORMAT_UNKNOWN;
 	ply->elements = NULL;
@@ -301,20 +317,22 @@ ply_parse_header(struct ply_parser *ply)
 	ply->propertiesTail = NULL;
 
 	for (;;) {
-		int r = ply->read_cb(ply->userdata, line + length, maxLine - length);
+		int r = ply->readFunc(ply->readData,
+			ply->line + ply->lineLength, PLY_MAX_LINE - ply->lineLength);
 		if (r < 0) return PLY_ERR_READ;
-		length += (unsigned)r;
+		ply->lineLength += (unsigned)r;
 
-		char *nl = strchr(line, '\n');
+		char *nl = strchr(ply->line, '\n');
 		if (!nl) return PLY_ERR_SYNTAX;
 		*nl = 0;
 
-		int s = ply_parse_header_line(ply, line);
+		int s = ply_parse_header_line(ply, ply->line);
 		if (s < 0) return s;
-		if (s == 0) break;
 
-		length -= nl + 1 - line;
-		memmove(line, nl + 1, length);
+		ply->lineLength -= nl + 1 - ply->line;
+		memmove(ply->line, nl + 1, ply->lineLength);
+
+		if (s == 0) break;
 	}
 
 	return 0;
@@ -437,6 +455,105 @@ ply_read_datum(enum ply_format format, const char *raw, enum ply_type type, unio
 	default:
 		return -1;
 	}
+}
+
+int
+ply_parse_contents(struct ply_parser *ply)
+{
+	const struct ply_element *element = ply->elements;
+	while (element) {
+		if (ply->handler.startElement) {
+			ply->handler.startElement(ply->handler.userdata, element->name);
+		}
+
+		for (unsigned long t = 0; t < element->numTuples; t++) {
+			int r = ply->readFunc(ply->readData, ply->line + ply->lineLength, PLY_MAX_LINE - ply->lineLength);
+			if (r < 0) return PLY_ERR_READ;
+			ply->lineLength += (unsigned)r;
+
+			char *nl = strchr(ply->line, '\n');
+			if (!nl) return PLY_ERR_SYNTAX;
+			*nl = 0;
+
+			char *tokenState = ply->line;
+
+			if (ply->handler.startTuple) {
+				ply->handler.startTuple(ply->handler.userdata);
+			}
+
+			const struct ply_property *property = element->properties;
+			while (property) {
+				char *token;
+				token = ply_next_token(&tokenState, ' ');
+				if (!token) return PLY_ERR_SYNTAX;
+
+				if (property->isList) {
+					union ply_datum datum;
+					r = ply_read_datum_ascii(token, property->indexType, &datum);
+					if (r < 0) return r;
+
+					if (ply->handler.startList) {
+						ply->handler.startList(ply->handler.userdata, datum.u32); // TODO
+					}
+
+					if (ply->handler.endList) {
+						ply->handler.endList(ply->handler.userdata);
+					}
+				} else {
+					union ply_datum datum;
+					r = ply_read_datum_ascii(token, property->dataType, &datum);
+					if (r < 0) return r;
+
+					switch (property->dataType) {
+					case PLY_TYPE_INT8:
+					case PLY_TYPE_INT16:
+					case PLY_TYPE_INT32:
+						if (ply->handler.onSignedInt) {
+							ply->handler.onSignedInt(ply->handler.userdata, datum.i32); // TODO
+						}
+						break;
+
+					case PLY_TYPE_UINT8:
+					case PLY_TYPE_UINT16:
+					case PLY_TYPE_UINT32:
+						if (ply->handler.onUnsignedInt) {
+							ply->handler.onUnsignedInt(ply->handler.userdata, datum.u32); // TODO
+						}
+						break;
+
+					case PLY_TYPE_FLOAT32:
+						if (ply->handler.onFloat) {
+							ply->handler.onFloat(ply->handler.userdata, datum.f32);
+						}
+						break;
+
+					case PLY_TYPE_FLOAT64:
+						if (ply->handler.onDouble) {
+							ply->handler.onDouble(ply->handler.userdata, datum.f64);
+						}
+						break;
+					}
+				}
+
+				property = property->next;
+			}
+
+			if (ply->handler.endTuple) {
+				ply->handler.endTuple(ply->handler.userdata);
+			}
+
+			ply->lineLength -= nl + 1 - ply->line;
+			memmove(ply->line, nl + 1, ply->lineLength);
+		}
+
+		if (ply->handler.endElement) {
+			ply->handler.endElement(ply->handler.userdata);
+		}
+
+		element = element->next;
+	}
+
+	return 0;
 }
 
 #endif

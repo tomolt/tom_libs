@@ -14,6 +14,42 @@ file_read_callback(void *file, void *buffer, unsigned max)
 	return (int)got;
 }
 
+static unsigned tupleCounter;
+
+bool
+start_element(void *userdata, const char *name)
+{
+	(void)userdata;
+	printf("ELEMENT %s\n", name);
+	tupleCounter = 0;
+	return true;
+}
+
+bool
+start_tuple(void *userdata)
+{
+	(void)userdata;
+	printf("  TUPLE %u\n", tupleCounter);
+	tupleCounter++;
+	return true;
+}
+
+bool
+start_list(void *userdata, unsigned length)
+{
+	(void)userdata;
+	printf("    LIST (LENGTH=%u)\n", length);
+	return true;
+}
+
+bool
+on_float(void *userdata, float value)
+{
+	(void)userdata;
+	printf("    FLOAT %f\n", value);
+	return true;
+}
+
 int
 main(int argc, const char **argv)
 {
@@ -28,33 +64,46 @@ main(int argc, const char **argv)
 		return 1;
 	}
 
-	struct ply_parser ply;
+	struct ply_parser ply = { 0 };
 	ply.workSize = 16 * 1024 * 1024;
 	ply.workArea = calloc(1, ply.workSize);
 	ply.workBreak = ply.workSize;
 	ply.workBreak &= ~(size_t)0xF;
-	ply.userdata = plyFile;
-	ply.read_cb = file_read_callback;
+	ply.readData = plyFile;
+	ply.readFunc = file_read_callback;
 
 	int s = ply_parse_header(&ply);
 	if (s < 0) {
 		fclose(plyFile);
-		fprintf(stderr, "can't parse ply file\n");
+		fprintf(stderr, "can't parse ply header\n");
 		return 1;
 	}
-	fclose(plyFile);
 
+	printf("HEADER\n======\n");
 	struct ply_element *element = ply.elements;
 	while (element) {
 		printf("ELEMENT %s\n", element->name);
 		struct ply_property *property = element->properties;
 		while (property) {
-			printf("PROPERTY %s\n", property->name);
+			printf("  PROPERTY %s\n", property->name);
 			property = property->next;
 		}
 		element = element->next;
 	}
 
+	printf("\nCONTENTS\n========\n");
+	ply.handler.startElement = start_element;
+	ply.handler.startTuple = start_tuple;
+	ply.handler.startList = start_list;
+	ply.handler.onFloat = on_float;
+	s = ply_parse_contents(&ply);
+	if (s < 0) {
+		fclose(plyFile);
+		fprintf(stderr, "can't parse ply contents\n");
+		return 1;
+	}
+
+	fclose(plyFile);
 	free(ply.workArea);
 	return 0;
 }
