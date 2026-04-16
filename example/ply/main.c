@@ -16,6 +16,7 @@ file_read_callback(void *file, void *buffer, unsigned max)
 }
 
 static unsigned tupleCounter;
+static enum ply_type itemType;
 
 bool
 start_element(void *userdata, const char *name)
@@ -36,10 +37,69 @@ start_tuple(void *userdata)
 }
 
 bool
-start_list(void *userdata, unsigned length)
+start_list(void *userdata, unsigned length, enum ply_type type)
 {
 	(void)userdata;
-	printf("    LIST (LENGTH=%u)\n", length);
+	itemType = type;
+	char typeChar;
+	switch (itemType) {
+	case PLY_TYPE_INT8:
+	case PLY_TYPE_INT16:
+	case PLY_TYPE_INT32:
+		typeChar = 'I';
+		break;
+
+	case PLY_TYPE_UINT8:
+	case PLY_TYPE_UINT16:
+	case PLY_TYPE_UINT32:
+		typeChar = 'U';
+		break;
+
+	case PLY_TYPE_FLOAT32:
+		typeChar = 'F';
+		break;
+
+	case PLY_TYPE_FLOAT64:
+		typeChar = 'D';
+		break;
+	}
+	printf("    L %u of %c [ ", length, typeChar);
+	return true;
+}
+
+bool
+end_list(void *userdata)
+{
+	(void)userdata;
+	printf("]\n");
+	return true;
+}
+
+bool
+on_list_item(void *userdata, union ply_datum datum)
+{
+	(void)userdata;
+	switch (itemType) {
+	case PLY_TYPE_INT8:
+	case PLY_TYPE_INT16:
+	case PLY_TYPE_INT32:
+		printf("%"PRId32" ", datum.i);
+		break;
+
+	case PLY_TYPE_UINT8:
+	case PLY_TYPE_UINT16:
+	case PLY_TYPE_UINT32:
+		printf("%"PRIu32" ", datum.u);
+		break;
+
+	case PLY_TYPE_FLOAT32:
+		printf("%f ", datum.f);
+		break;
+
+	case PLY_TYPE_FLOAT64:
+		printf("%lf ", datum.d);
+		break;
+	}
 	return true;
 }
 
@@ -116,6 +176,8 @@ main(int argc, const char **argv)
 	ply.handler.startElement = start_element;
 	ply.handler.startTuple = start_tuple;
 	ply.handler.startList = start_list;
+	ply.handler.endList = end_list;
+	ply.handler.onListItem = on_list_item;
 	ply.handler.onDatum = on_datum;
 	s = ply_parse_contents(&ply);
 	if (s < 0) {
