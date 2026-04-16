@@ -95,6 +95,8 @@ int ply_parse_header(struct ply_parser *ply);
 struct ply_element  *ply_get_element_by_name(const struct ply_parser *ply, const char *name);
 struct ply_property *ply_get_property_by_name(const struct ply_element *element, const char *name);
 int ply_parse_contents(struct ply_parser *ply);
+union ply_datum ply_cast(enum ply_type desiredType, enum ply_type dataType, union ply_datum datum);
+union ply_datum ply_cast_normalized(enum ply_type desiredType, enum ply_type dataType, union ply_datum datum);
 
 #endif
 
@@ -102,6 +104,13 @@ int ply_parse_contents(struct ply_parser *ply);
 
 #include <stdlib.h>
 #include <string.h>
+
+/* These macros are short-hands for longer case-lists inside switch statements.
+ * They are really ugly, but at least they play well with auto-formatting ...
+ */
+#define PLY_TYPE_INT_      PLY_TYPE_INT8:  case PLY_TYPE_INT16:  case PLY_TYPE_INT32
+#define PLY_TYPE_UINT_     PLY_TYPE_UINT8: case PLY_TYPE_UINT16: case PLY_TYPE_UINT32
+#define PLY_TYPE_FLOAT_    PLY_TYPE_FLOAT32: case PLY_TYPE_FLOAT64
 
 const char *ply_type_names[] = {
 	"int8",    "char",
@@ -430,7 +439,11 @@ ply_read_datum_le(const char *raw, enum ply_type type, union ply_datum *datum)
 	uint64_t q;
 	switch (type) {
 	case PLY_TYPE_INT8:
-		datum->i  = raw[0];
+		datum->i  = (int32_t)raw[0];
+		break;
+
+	case PLY_TYPE_UINT8:
+		datum->u  = (uint32_t)raw[0];
 		break;
 
 	case PLY_TYPE_INT16:
@@ -438,22 +451,12 @@ ply_read_datum_le(const char *raw, enum ply_type type, union ply_datum *datum)
 		datum->i |= (int32_t)raw[1] << 8;
 		break;
 
-	case PLY_TYPE_INT32:
-		datum->i  = (int32_t)raw[0] <<  0;
-		datum->i |= (int32_t)raw[1] <<  8;
-		datum->i |= (int32_t)raw[2] << 16;
-		datum->i |= (int32_t)raw[3] << 24;
-		break;
-
-	case PLY_TYPE_UINT8:
-		datum->u  = (uint32_t)raw[0];
-		break;
-
 	case PLY_TYPE_UINT16:
 		datum->u  = (uint32_t)raw[0] << 0;
 		datum->u |= (uint32_t)raw[1] << 8;
 		break;
 
+	case PLY_TYPE_INT32:
 	case PLY_TYPE_UINT32:
 	case PLY_TYPE_FLOAT32:
 		datum->u  = (uint32_t)raw[0] <<  0;
@@ -475,31 +478,6 @@ ply_read_datum_le(const char *raw, enum ply_type type, union ply_datum *datum)
 	}
 	return 0;
 }
-
-#if 0
-int
-ply_read_datum_native(const char *raw, enum ply_type type, union ply_datum *datum)
-{
-	unsigned size = ply_type_sizes[type];
-	// FIXME this won't work on big-endian machines!
-	memcpy(datum->raw, raw, size);
-	return 0;
-}
-
-int
-ply_read_datum_reversed(const char *raw, enum ply_type type, union ply_datum *datum)
-{
-	unsigned size = ply_type_sizes[type];
-	// FIXME this won't work on big-endian machines!
-	memcpy(datum->raw, raw, size);
-	for (unsigned i = 0, j = size - 1; i < j; i++, j--) {
-		char tmp      = datum->raw[i];
-		datum->raw[i] = datum->raw[j];
-		datum->raw[j] = tmp;
-	}
-	return 0;
-}
-#endif
 
 static int
 ply_read_datum(enum ply_format format, const char *raw, enum ply_type type, union ply_datum *datum)
@@ -636,22 +614,75 @@ ply_parse_contents(struct ply_parser *ply)
 	}
 }
 
-#if 0
+#define PLY_STORE_CAST_VALUE(destType, dest, dataType, datum)\
+	switch (dataType) {\
+		case PLY_TYPE_INT_:    dest = (destType)datum.i; break;\
+		case PLY_TYPE_UINT_:   dest = (destType)datum.u; break;\
+		case PLY_TYPE_FLOAT32: dest = (destType)datum.f; break;\
+		case PLY_TYPE_FLOAT64: dest = (destType)datum.d; break;\
+	}
+
 union ply_datum
 ply_cast(enum ply_type desiredType, enum ply_type dataType, union ply_datum datum)
 {
 	union ply_datum castDatum;
 	switch (desiredType) {
-	case PLY_TYPE_INT32:
+	case PLY_TYPE_INT_:    PLY_STORE_CAST_VALUE(int32_t,  castDatum.i, dataType, datum); break;
+	case PLY_TYPE_UINT_:   PLY_STORE_CAST_VALUE(uint32_t, castDatum.u, dataType, datum); break;
+	case PLY_TYPE_FLOAT32: PLY_STORE_CAST_VALUE(float,    castDatum.f, dataType, datum); break;
+	case PLY_TYPE_FLOAT64: PLY_STORE_CAST_VALUE(double,   castDatum.d, dataType, datum); break;
+	}
+	return castDatum;
+}
+
+#define PLY_NORMALIZE(v, min, max) ((v) < 0 ? -((v) / (min)) : (v) / (max))
+
+union ply_datum
+ply_cast_normalized(enum ply_type desiredType, enum ply_type dataType, union ply_datum datum)
+{
+	union ply_datum castDatum;
+	switch (desiredType) {
+	case PLY_TYPE_INT_:    PLY_STORE_CAST_VALUE(int32_t,  castDatum.i, dataType, datum); break;
+	case PLY_TYPE_UINT_:   PLY_STORE_CAST_VALUE(uint32_t, castDatum.u, dataType, datum); break;
+
+	case PLY_TYPE_FLOAT32:
 		switch (dataType) {
-		case PLY_TYPE_FLOAT:
-			castDatum.i = (int32_t)datum.f;
-			break;
+		case PLY_TYPE_INT8:    castDatum.f = PLY_NORMALIZE((float)datum.i, INT8_MIN,  INT8_MAX);  break;
+		case PLY_TYPE_INT16:   castDatum.f = PLY_NORMALIZE((float)datum.i, INT16_MIN, INT16_MAX); break;
+		case PLY_TYPE_INT32:   castDatum.f = PLY_NORMALIZE((float)datum.i, INT32_MIN, INT32_MAX); break;
+
+		case PLY_TYPE_UINT8:   castDatum.f = (float)datum.u / UINT8_MAX;  break;
+		case PLY_TYPE_UINT16:  castDatum.f = (float)datum.u / UINT16_MAX; break;
+		case PLY_TYPE_UINT32:  castDatum.f = (float)datum.u / UINT32_MAX; break;
+
+		case PLY_TYPE_FLOAT32: castDatum.f = (float)datum.f; break;
+		case PLY_TYPE_FLOAT64: castDatum.f = (float)datum.d; break;
+		}
+		break;
+	
+	case PLY_TYPE_FLOAT64:
+		switch (dataType) {
+		case PLY_TYPE_INT8:    castDatum.d = PLY_NORMALIZE((double)datum.i, INT8_MIN,  INT8_MAX);  break;
+		case PLY_TYPE_INT16:   castDatum.d = PLY_NORMALIZE((double)datum.i, INT16_MIN, INT16_MAX); break;
+		case PLY_TYPE_INT32:   castDatum.d = PLY_NORMALIZE((double)datum.i, INT32_MIN, INT32_MAX); break;
+
+		case PLY_TYPE_UINT8:   castDatum.d = (double)datum.u / UINT8_MAX;  break;
+		case PLY_TYPE_UINT16:  castDatum.d = (double)datum.u / UINT16_MAX; break;
+		case PLY_TYPE_UINT32:  castDatum.d = (double)datum.u / UINT32_MAX; break;
+
+		case PLY_TYPE_FLOAT32: castDatum.d = (double)datum.f; break;
+		case PLY_TYPE_FLOAT64: castDatum.d = (double)datum.d; break;
 		}
 		break;
 	}
+	return castDatum;
 }
-#endif
+
+#undef PLY_STORE_CAST_VALUE
+#undef PLY_NORMALIZE
+#undef PLY_TYPE_INT_
+#undef PLY_TYPE_UINT_
+#undef PLY_TYPE_FLOAT_
 
 /*
 
