@@ -1,13 +1,13 @@
-Thomas Oltmann's Miniatures
-===========================
+Thomas Oltmann's Miniature Libraries
+====================================
 
 *Small, standalone, single-header C libraries*
 
 Contents
 --------
 
-| Library | Latest Version | Description |
-| :------ | -------------: | :---------- |
-| tom\_rcon.h |  | Embeddable RCON (remote command execution) protocol server |
-| tom\_ply.h |  | Zero-Allocation Stanford PLY parser |
+| Library | Description | Latest Version | Lines of Code |
+| :------ | :---------- | -------------: | ------------: |
+| tom\_rcon.h |  | Embeddable RCON (remote command execution) protocol server |  |  |
+| tom\_ply.h |  | Zero-Allocation Stanford PLY parser | 0.1 | <1000 LoC |
 
