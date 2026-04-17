@@ -169,7 +169,6 @@ main(int argc, const char **argv)
 
 	ply_parser_set_work_area(&ply, workArea, workSize);
 	ply_parser_set_input(&ply, file_read_callback, plyFile);
-	ply_parser_set_handler(&ply, &my_handler);
 
 	int s = ply_parse_header(&ply);
 	if (s < 0) {

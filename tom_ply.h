@@ -50,7 +50,6 @@ struct ply_handler {
 	bool (*startList)(void *userdata, PLY_PROPERTY property, uint32_t length);
 	bool (*endList)(void *userdata);
 	bool (*onListItem)(void *userdata, union ply_datum value);
-	void *userdata;
 };
 
 enum ply_format {
@@ -91,8 +90,6 @@ struct ply_parser {
 	ply_read_callback readFunc;
 	void             *readData;
 
-	const struct ply_handler *handler;
-
 	// TODO fold this into the workArea
 	char line[PLY_MAX_LINE];
 	unsigned lineLength;
@@ -129,15 +126,11 @@ ply_parser_get_element_count(struct ply_parser *ply) { return ply->numElements; 
 static inline enum ply_format
 ply_parser_get_format(struct ply_parser *ply) { return ply->format; }
 
-extern const char   *ply_type_names[];
-extern unsigned      ply_type_sizes[];
-
 const char          *ply_strerror(int status);
 
 void                 ply_parser_reset(struct ply_parser *ply);
 void                 ply_parser_set_input(struct ply_parser *ply, ply_read_callback readFunc, void *readData);
 void                 ply_parser_set_work_area(struct ply_parser *ply, void *workArea, size_t workSize);
-void                 ply_parser_set_handler(struct ply_parser *ply, const struct ply_handler *handler);
 
 int                  ply_parse_header(struct ply_parser *ply);
 
@@ -169,7 +162,7 @@ int  ply_stream_list_item(struct ply_parser *ply, union ply_datum *datum);
 #define PLY_TYPE_UINT_     PLY_TYPE_UINT8: case PLY_TYPE_UINT16: case PLY_TYPE_UINT32
 #define PLY_TYPE_FLOAT_    PLY_TYPE_FLOAT32: case PLY_TYPE_FLOAT64
 
-const char *ply_type_names[] = {
+static const char *ply_type_names[] = {
 	"int8",    "char",
 	"uint8",   "uchar",
 	"int16",   "short",
@@ -179,17 +172,6 @@ const char *ply_type_names[] = {
 	"float32", "float",
 	"float64", "double",
 	NULL
-};
-
-unsigned ply_type_sizes[] = {
-	1,
-	1,
-	2,
-	2,
-	4,
-	4,
-	4,
-	8,
 };
 
 const char *
@@ -236,12 +218,6 @@ ply_parser_set_work_area(struct ply_parser *ply, void *workArea, size_t workSize
 
 	ply->workBreak  = ply->workSize;
 	ply->workBreak &= ~(size_t)0xF;
-}
-
-void
-ply_parser_set_handler(struct ply_parser *ply, const struct ply_handler *handler)
-{
-	ply->handler = handler;
 }
 
 static void *
