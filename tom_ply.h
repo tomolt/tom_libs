@@ -102,8 +102,7 @@ struct ply_parser {
 	unsigned long currentTuple;
 	PLY_PROPERTY  currentProperty;
 	unsigned long currentItem;
-	char         *tokenState;
-	char         *nextLine;
+	unsigned long offset;
 };
 
 static inline const char *
@@ -548,8 +547,9 @@ ply_read_datum_ascii(const char *str, enum ply_type type, union ply_datum *datum
 	default:
 		return PLY_ERR_INTERNAL;
 	}
-	if (*end) return PLY_ERR_SYNTAX;
-	return 0;
+	if (!end || end == str) return PLY_ERR_SYNTAX;
+	while (*end == ' ') end++;
+	return end - str;
 }
 
 static int
@@ -674,7 +674,7 @@ ply_parser_start_streaming(struct ply_parser *ply)
 	ply->currentTuple    = ULONG_MAX;
 	ply->currentProperty = NULL;
 	ply->currentItem     = 0;
-
+	ply->offset          = 0;
 	return 0;
 }
 
@@ -690,11 +690,6 @@ ply_advance(struct ply_parser *ply)
 		int r = ply->readFunc(ply->readData, ply->line + ply->lineLength, PLY_MAX_LINE - ply->lineLength);
 		if (r < 0) return PLY_ERR_READ;
 		ply->lineLength += (unsigned)r;
-
-		ply->nextLine = strchr(ply->line, '\n');
-		if (!ply->nextLine) return PLY_ERR_SYNTAX;
-		*ply->nextLine = 0;
-		ply->tokenState = ply->line;
 
 		return 0;
 	}
@@ -714,17 +709,13 @@ ply_advance(struct ply_parser *ply)
 		}
 		ply->currentProperty = ply->currentElement->properties;
 
-		ply->lineLength -= ply->nextLine + 1 - ply->line;
-		memmove(ply->line, ply->nextLine + 1, ply->lineLength);
+		ply->lineLength -= ply->offset + 1;
+		memmove(ply->line, ply->line + ply->offset + 1, ply->lineLength);
+		ply->offset = 0;
 
 		int r = ply->readFunc(ply->readData, ply->line + ply->lineLength, PLY_MAX_LINE - ply->lineLength);
 		if (r < 0) return PLY_ERR_READ;
 		ply->lineLength += (unsigned)r;
-
-		ply->nextLine = strchr(ply->line, '\n');
-		if (!ply->nextLine) return PLY_ERR_SYNTAX;
-		*ply->nextLine = 0;
-		ply->tokenState = ply->line;
 	}
 	return 0;
 }
@@ -734,14 +725,12 @@ ply_stream_value(struct ply_parser *ply, union ply_datum *datum)
 {
 	ply_advance(ply);
 
-	char *token = ply_next_token(&ply->tokenState, ' ');
-	if (!token) return PLY_ERR_SYNTAX;
-
 	int r;
 	if (ply->currentProperty->isList) {
 		union ply_datum indexDatum;
-		r = ply_read_datum_ascii(token, ply->currentProperty->dataType, &indexDatum);
+		r = ply_read_datum_ascii(ply->line + ply->offset, ply->currentProperty->dataType, &indexDatum);
 		if (r < 0) return r;
+		ply->offset += r;
 
 		unsigned listLength;
 		switch (ply->currentProperty->indexType) {
@@ -755,8 +744,9 @@ ply_stream_value(struct ply_parser *ply, union ply_datum *datum)
 		datum->u = listLength;
 		ply->currentItem = 0;
 	} else {
-		r = ply_read_datum_ascii(token, ply->currentProperty->dataType, datum);
+		r = ply_read_datum_ascii(ply->line + ply->offset, ply->currentProperty->dataType, datum);
 		if (r < 0) return r;
+		ply->offset += r;
 	}
 
 	return 0;
@@ -765,12 +755,10 @@ ply_stream_value(struct ply_parser *ply, union ply_datum *datum)
 int
 ply_stream_list_item(struct ply_parser *ply, union ply_datum *datum)
 {
-	char *token = ply_next_token(&ply->tokenState, ' ');
-	if (!token) return PLY_ERR_SYNTAX;
-
 	int r;
-	r = ply_read_datum_ascii(token, ply->currentProperty->dataType, datum);
+	r = ply_read_datum_ascii(ply->line + ply->offset, ply->currentProperty->dataType, datum);
 	if (r < 0) return r;
+	ply->offset += r;
 
 	// Advance to the next list item
 	ply->currentItem++;
