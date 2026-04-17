@@ -91,8 +91,8 @@ typedef const struct ply_element  *PLY_ELEMENT;
 struct ply_property {
 	struct ply_property  *next;
 	char                  name[PLY_MAX_NAME];
-	enum ply_type         indexType;
-	enum ply_type         dataType;
+	enum ply_type         lengthType;
+	enum ply_type         scalarType;
 	unsigned char         isList;
 };
 
@@ -155,9 +155,9 @@ ply_property_get_name(PLY_PROPERTY property) { return property->name; }
 static inline enum ply_type
 ply_property_is_list(PLY_PROPERTY property) { return property->isList; }
 static inline enum ply_type
-ply_property_get_index_type(PLY_PROPERTY property) { return property->indexType; }
+ply_property_get_length_type(PLY_PROPERTY property) { return property->lengthType; }
 static inline enum ply_type
-ply_property_get_data_type(PLY_PROPERTY property) { return property->dataType; }
+ply_property_get_scalar_type(PLY_PROPERTY property) { return property->scalarType; }
 static inline const char *
 ply_element_get_name(PLY_ELEMENT element) { return element->name; }
 static inline unsigned long
@@ -187,19 +187,6 @@ void ply_parser_set_memory(struct ply_parser *ply, void *memory, size_t memorySi
  * of elements and properties using the accessor functions.
  */
 int  ply_process_header(struct ply_parser *ply);
-
-/* Sometimes, PLY files provide the properties that you need in different types than the ones you expect.
- * For these situations, you can use ply_cast() to convert a value from its current type to any other.
- * This function does not check for any under- or overflows that may occur.
- * When floating-point values are cast to integer values, they are rounded towards zero.
- */
-union ply_scalar ply_cast(enum ply_type desiredType, enum ply_type dataType, union ply_scalar value);
-
-/* This function is identical to ply_cast(), except that when casting to a floating-point type,
- * signed integer types are normalized to a range between -1.0 and 1.0,
- * and unsigned integer types are normalized to a range between 0.0 and 1.0.
- */
-union ply_scalar ply_cast_normalized(enum ply_type desiredType, enum ply_type dataType, union ply_scalar value);
 
 /* Preferred, stream-based parsing functionality.
  * 
@@ -247,20 +234,34 @@ struct ply_handler {
  */
 int  ply_process_with_callbacks(struct ply_parser *ply, const struct ply_handler *handler, void *userdata);
 
+/* Sometimes, PLY files provide the properties that you need in different types than the ones you expect.
+ * For these situations, you can use ply_cast() to convert a value from its current type to any other.
+ * This function does not check for any under- or overflows that may occur.
+ * When floating-point values are cast to integer values, they are rounded towards zero.
+ */
+union ply_scalar ply_cast(enum ply_type desiredType, enum ply_type scalarType, union ply_scalar value);
+
+/* This function is identical to ply_cast(), except that when casting to a floating-point type,
+ * signed integer types are normalized to a range between -1.0 and 1.0,
+ * and unsigned integer types are normalized to a range between 0.0 and 1.0.
+ */
+union ply_scalar ply_cast_normalized(enum ply_type desiredType, enum ply_type scalarType, union ply_scalar value);
+
 #endif
 
 #ifdef PLY_IMPLEMENTATION
 
 #include <stdlib.h> // strtof(), strtod(), strtol(), strtoul()
-#include <string.h> // memcmp(), strcmp(), memmove(), memset()
+#include <string.h> // memcmp(), strcmp(), memmove(), memset(), strncpy()
 
-/* These macros are short-hands for longer case-lists inside switch statements.
+/* These macros are short-hands for case-lists inside switch statements.
  * They are really ugly, but at least they play well with auto-formatting ...
  */
 #define PLY_TYPE_INT_      PLY_TYPE_INT8:  case PLY_TYPE_INT16:  case PLY_TYPE_INT32
 #define PLY_TYPE_UINT_     PLY_TYPE_UINT8: case PLY_TYPE_UINT16: case PLY_TYPE_UINT32
 #define PLY_TYPE_FLOAT_    PLY_TYPE_FLOAT32: case PLY_TYPE_FLOAT64
 
+// Must be kept in the same order as the ply_type enum.
 static const char *ply_type_names[] = {
 	"int8",    "char",
 	"uint8",   "uchar",
@@ -305,6 +306,10 @@ ply_parser_set_memory(struct ply_parser *ply, void *memory, size_t memorySize)
 	ply->memoryBreak &= ~(size_t)0xF;
 }
 
+/* Reserve some space from the top of the memory pool.
+ * The returned pointers are 16-byte aligned.
+ * The space is cleared to zero.
+ */
 static void *
 ply_reserve(struct ply_parser *ply, size_t size)
 {
@@ -415,10 +420,10 @@ ply_parse_property(struct ply_parser *ply, char **tokenState)
 		token = ply_next_token(tokenState, ' ');
 		if (!token) return PLY_ERR_SYNTAX;
 
-		int s = ply_parse_type(token, &property->indexType);
+		int s = ply_parse_type(token, &property->lengthType);
 		if (s < 0) return s;
-		if (property->indexType == PLY_TYPE_FLOAT32 ||
-			property->indexType == PLY_TYPE_FLOAT64) {
+		if (property->lengthType == PLY_TYPE_FLOAT32 ||
+			property->lengthType == PLY_TYPE_FLOAT64) {
 			return PLY_ERR_SYNTAX;
 		}
 
@@ -426,7 +431,7 @@ ply_parse_property(struct ply_parser *ply, char **tokenState)
 		if (!token) return PLY_ERR_SYNTAX;
 	}
 
-	int s = ply_parse_type(token, &property->dataType);
+	int s = ply_parse_type(token, &property->scalarType);
 	if (s < 0) return s;
 
 	token = ply_next_token(tokenState, ' ');
@@ -735,70 +740,6 @@ ply_read_scalar(enum ply_format format, const char *raw, enum ply_type type, uni
 	}
 }
 
-#define PLY_STORE_CAST_VALUE(destType, dest, dataType, value)\
-	switch (dataType) {\
-		case PLY_TYPE_INT_:    dest = (destType)value.i; break;\
-		case PLY_TYPE_UINT_:   dest = (destType)value.u; break;\
-		case PLY_TYPE_FLOAT32: dest = (destType)value.f; break;\
-		case PLY_TYPE_FLOAT64: dest = (destType)value.d; break;\
-	}
-
-union ply_scalar
-ply_cast(enum ply_type desiredType, enum ply_type dataType, union ply_scalar value)
-{
-	union ply_scalar castValue;
-	switch (desiredType) {
-	case PLY_TYPE_INT_:    PLY_STORE_CAST_VALUE(int32_t,  castValue.i, dataType, value); break;
-	case PLY_TYPE_UINT_:   PLY_STORE_CAST_VALUE(uint32_t, castValue.u, dataType, value); break;
-	case PLY_TYPE_FLOAT32: PLY_STORE_CAST_VALUE(float,    castValue.f, dataType, value); break;
-	case PLY_TYPE_FLOAT64: PLY_STORE_CAST_VALUE(double,   castValue.d, dataType, value); break;
-	}
-	return castValue;
-}
-
-#define PLY_NORMALIZE(v, min, max) ((v) < 0 ? -((v) / (min)) : (v) / (max))
-
-union ply_scalar
-ply_cast_normalized(enum ply_type desiredType, enum ply_type dataType, union ply_scalar value)
-{
-	union ply_scalar castValue;
-	switch (desiredType) {
-	case PLY_TYPE_INT_:    PLY_STORE_CAST_VALUE(int32_t,  castValue.i, dataType, value); break;
-	case PLY_TYPE_UINT_:   PLY_STORE_CAST_VALUE(uint32_t, castValue.u, dataType, value); break;
-
-	case PLY_TYPE_FLOAT32:
-		switch (dataType) {
-		case PLY_TYPE_INT8:    castValue.f = PLY_NORMALIZE((float)value.i, INT8_MIN,  INT8_MAX);  break;
-		case PLY_TYPE_INT16:   castValue.f = PLY_NORMALIZE((float)value.i, INT16_MIN, INT16_MAX); break;
-		case PLY_TYPE_INT32:   castValue.f = PLY_NORMALIZE((float)value.i, INT32_MIN, INT32_MAX); break;
-
-		case PLY_TYPE_UINT8:   castValue.f = (float)value.u / UINT8_MAX;  break;
-		case PLY_TYPE_UINT16:  castValue.f = (float)value.u / UINT16_MAX; break;
-		case PLY_TYPE_UINT32:  castValue.f = (float)value.u / UINT32_MAX; break;
-
-		case PLY_TYPE_FLOAT32: castValue.f = (float)value.f; break;
-		case PLY_TYPE_FLOAT64: castValue.f = (float)value.d; break;
-		}
-		break;
-	
-	case PLY_TYPE_FLOAT64:
-		switch (dataType) {
-		case PLY_TYPE_INT8:    castValue.d = PLY_NORMALIZE((double)value.i, INT8_MIN,  INT8_MAX);  break;
-		case PLY_TYPE_INT16:   castValue.d = PLY_NORMALIZE((double)value.i, INT16_MIN, INT16_MAX); break;
-		case PLY_TYPE_INT32:   castValue.d = PLY_NORMALIZE((double)value.i, INT32_MIN, INT32_MAX); break;
-
-		case PLY_TYPE_UINT8:   castValue.d = (double)value.u / UINT8_MAX;  break;
-		case PLY_TYPE_UINT16:  castValue.d = (double)value.u / UINT16_MAX; break;
-		case PLY_TYPE_UINT32:  castValue.d = (double)value.u / UINT32_MAX; break;
-
-		case PLY_TYPE_FLOAT32: castValue.d = (double)value.f; break;
-		case PLY_TYPE_FLOAT64: castValue.d = (double)value.d; break;
-		}
-		break;
-	}
-	return castValue;
-}
-
 // FIXME support #elems = 0 or #props = 0 or #tuples = 0
 
 int
@@ -831,8 +772,6 @@ ply_advance(struct ply_parser *ply)
 	// Advance to the next (element, tuple, property)
 	ply->currentProperty = ply->currentProperty->next;
 	if (!ply->currentProperty) {
-		// TODO make sure there aren't extraneous tokens at the end of the line
-
 		ply->currentTuple++;
 		if (ply->currentTuple >= ply->currentElement->numTuples) {
 			ply->currentElement = ply->currentElement->next;
@@ -850,6 +789,8 @@ ply_advance(struct ply_parser *ply)
 			ply->bufferOffset++;
 		}
 		
+		// TODO more flexibly refill the buffer only when needed. Both faster and allows for larger tuples.
+
 		ply->bufferFill -= ply->bufferOffset;
 		memmove(ply->memory, ply->memory + ply->bufferOffset, ply->bufferFill);
 		ply->bufferOffset = 0;
@@ -870,12 +811,12 @@ ply_stream_value(struct ply_parser *ply, union ply_scalar *value)
 	if (ply->currentProperty->isList) {
 		union ply_scalar lengthValue;
 		r = ply_read_scalar(ply->format, ply->memory + ply->bufferOffset,
-			ply->currentProperty->indexType, &lengthValue);
+			ply->currentProperty->lengthType, &lengthValue);
 		if (r < 0) return r;
 		ply->bufferOffset += r;
 
 		unsigned listLength;
-		switch (ply->currentProperty->indexType) {
+		switch (ply->currentProperty->lengthType) {
 		case PLY_TYPE_INT_:
 			if (lengthValue.i < 0) return PLY_ERR_SYNTAX;
 			listLength = (unsigned)lengthValue.i;
@@ -887,7 +828,7 @@ ply_stream_value(struct ply_parser *ply, union ply_scalar *value)
 		ply->currentItem = 0;
 	} else {
 		r = ply_read_scalar(ply->format, ply->memory + ply->bufferOffset,
-			ply->currentProperty->dataType, value);
+			ply->currentProperty->scalarType, value);
 		if (r < 0) return r;
 		ply->bufferOffset += r;
 	}
@@ -900,7 +841,7 @@ ply_stream_list_item(struct ply_parser *ply, union ply_scalar *value)
 {
 	int r;
 	r = ply_read_scalar(ply->format, ply->memory + ply->bufferOffset,
-		ply->currentProperty->dataType, value);
+		ply->currentProperty->scalarType, value);
 	if (r < 0) return r;
 	ply->bufferOffset += r;
 
@@ -981,6 +922,70 @@ ply_process_with_callbacks(struct ply_parser *ply, const struct ply_handler *han
 		element = element->next;
 	}
 	return 0;
+}
+
+#define PLY_STORE_CAST_VALUE(destType, dest, scalarType, value)\
+	switch (scalarType) {\
+		case PLY_TYPE_INT_:    dest = (destType)value.i; break;\
+		case PLY_TYPE_UINT_:   dest = (destType)value.u; break;\
+		case PLY_TYPE_FLOAT32: dest = (destType)value.f; break;\
+		case PLY_TYPE_FLOAT64: dest = (destType)value.d; break;\
+	}
+
+union ply_scalar
+ply_cast(enum ply_type desiredType, enum ply_type scalarType, union ply_scalar value)
+{
+	union ply_scalar castValue;
+	switch (desiredType) {
+	case PLY_TYPE_INT_:    PLY_STORE_CAST_VALUE(int32_t,  castValue.i, scalarType, value); break;
+	case PLY_TYPE_UINT_:   PLY_STORE_CAST_VALUE(uint32_t, castValue.u, scalarType, value); break;
+	case PLY_TYPE_FLOAT32: PLY_STORE_CAST_VALUE(float,    castValue.f, scalarType, value); break;
+	case PLY_TYPE_FLOAT64: PLY_STORE_CAST_VALUE(double,   castValue.d, scalarType, value); break;
+	}
+	return castValue;
+}
+
+#define PLY_NORMALIZE(v, min, max) ((v) < 0 ? -((v) / (min)) : (v) / (max))
+
+union ply_scalar
+ply_cast_normalized(enum ply_type desiredType, enum ply_type scalarType, union ply_scalar value)
+{
+	union ply_scalar castValue;
+	switch (desiredType) {
+	case PLY_TYPE_INT_:    PLY_STORE_CAST_VALUE(int32_t,  castValue.i, scalarType, value); break;
+	case PLY_TYPE_UINT_:   PLY_STORE_CAST_VALUE(uint32_t, castValue.u, scalarType, value); break;
+
+	case PLY_TYPE_FLOAT32:
+		switch (scalarType) {
+		case PLY_TYPE_INT8:    castValue.f = PLY_NORMALIZE((float)value.i, INT8_MIN,  INT8_MAX);  break;
+		case PLY_TYPE_INT16:   castValue.f = PLY_NORMALIZE((float)value.i, INT16_MIN, INT16_MAX); break;
+		case PLY_TYPE_INT32:   castValue.f = PLY_NORMALIZE((float)value.i, INT32_MIN, INT32_MAX); break;
+
+		case PLY_TYPE_UINT8:   castValue.f = (float)value.u / UINT8_MAX;  break;
+		case PLY_TYPE_UINT16:  castValue.f = (float)value.u / UINT16_MAX; break;
+		case PLY_TYPE_UINT32:  castValue.f = (float)value.u / UINT32_MAX; break;
+
+		case PLY_TYPE_FLOAT32: castValue.f = (float)value.f; break;
+		case PLY_TYPE_FLOAT64: castValue.f = (float)value.d; break;
+		}
+		break;
+	
+	case PLY_TYPE_FLOAT64:
+		switch (scalarType) {
+		case PLY_TYPE_INT8:    castValue.d = PLY_NORMALIZE((double)value.i, INT8_MIN,  INT8_MAX);  break;
+		case PLY_TYPE_INT16:   castValue.d = PLY_NORMALIZE((double)value.i, INT16_MIN, INT16_MAX); break;
+		case PLY_TYPE_INT32:   castValue.d = PLY_NORMALIZE((double)value.i, INT32_MIN, INT32_MAX); break;
+
+		case PLY_TYPE_UINT8:   castValue.d = (double)value.u / UINT8_MAX;  break;
+		case PLY_TYPE_UINT16:  castValue.d = (double)value.u / UINT16_MAX; break;
+		case PLY_TYPE_UINT32:  castValue.d = (double)value.u / UINT32_MAX; break;
+
+		case PLY_TYPE_FLOAT32: castValue.d = (double)value.f; break;
+		case PLY_TYPE_FLOAT64: castValue.d = (double)value.d; break;
+		}
+		break;
+	}
+	return castValue;
 }
 
 #undef PLY_STORE_CAST_VALUE

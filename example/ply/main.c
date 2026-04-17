@@ -55,7 +55,7 @@ int
 on_scalar_value(void *userdata, PLY_PROPERTY property, union ply_scalar value)
 {
 	(void)userdata;
-	switch (ply_property_get_data_type(property)) {
+	switch (ply_property_get_scalar_type(property)) {
 	case PLY_TYPE_INT8:
 	case PLY_TYPE_INT16:
 	case PLY_TYPE_INT32:
@@ -83,7 +83,7 @@ int
 start_list(void *userdata, PLY_PROPERTY property, uint32_t length)
 {
 	(void)userdata;
-	itemType = ply_property_get_data_type(property);
+	itemType = ply_property_get_scalar_type(property);
 	const char *typeName = "";
 	switch (itemType) {
 		case PLY_TYPE_INT8:    typeName = "int8_t";   break;
@@ -190,7 +190,7 @@ main(int argc, const char **argv)
 		PLY_PROPERTY property = element->properties;
 		while (property) {
 			const char *typeName = "";
-			switch (ply_property_get_data_type(property)) {
+			switch (ply_property_get_scalar_type(property)) {
 			case PLY_TYPE_INT8:    typeName = "int8_t";   break;
 			case PLY_TYPE_INT16:   typeName = "int16_t";  break;
 			case PLY_TYPE_INT32:   typeName = "int32_t";  break;
