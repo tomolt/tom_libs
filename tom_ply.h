@@ -67,9 +67,11 @@ enum ply_type {
 	PLY_TYPE_FLOAT64,
 };
 
-union ply_datum {
-	int32_t  i;
-	uint32_t u;
+/* A scalar value, i.e. the value of a property that isn't a list.
+ */
+union ply_scalar {
+	int32_t  i; // Any signed int type: int8, int16, int32
+	uint32_t u; // Any unsigned int type: uint8, uint16, uint32
 	float    f;
 	double   d;
 };
@@ -191,13 +193,13 @@ int  ply_process_header(struct ply_parser *ply);
  * This function does not check for any under- or overflows that may occur.
  * When floating-point values are cast to integer values, they are rounded towards zero.
  */
-union ply_datum ply_cast(enum ply_type desiredType, enum ply_type dataType, union ply_datum datum);
+union ply_scalar ply_cast(enum ply_type desiredType, enum ply_type dataType, union ply_scalar value);
 
 /* This function is identical to ply_cast(), except that when casting to a floating-point type,
  * signed integer types are normalized to a range between -1.0 and 1.0,
  * and unsigned integer types are normalized to a range between 0.0 and 1.0.
  */
-union ply_datum ply_cast_normalized(enum ply_type desiredType, enum ply_type dataType, union ply_datum datum);
+union ply_scalar ply_cast_normalized(enum ply_type desiredType, enum ply_type dataType, union ply_scalar value);
 
 /* Preferred, stream-based parsing functionality.
  * 
@@ -208,19 +210,19 @@ union ply_datum ply_cast_normalized(enum ply_type desiredType, enum ply_type dat
  */
 int  ply_start_streaming(struct ply_parser *ply);
 
-/* Advance to the next value in the file, and store it in datum.
- * If the property being read is a list, then the length of the list is stored in datum.
+/* Advance to the next value in the file, and store it in *value.
+ * If the property being read is a list, then the length of the list is stored in *value.
  * Once you have read the length of the list,
  * you need to call ply_stream_list_item() once for each item in the list,
  * before reading the next value via ply_stream_value().
  */
-int  ply_stream_value(struct ply_parser *ply, union ply_datum *datum);
+int  ply_stream_value(struct ply_parser *ply, union ply_scalar *value);
 
 /* Advance to the next list item and read it.
  * This function should only be called when the stream is inside of a list.
  * It should only be called once for each item in the list.
  */
-int  ply_stream_list_item(struct ply_parser *ply, union ply_datum *datum);
+int  ply_stream_list_item(struct ply_parser *ply, union ply_scalar *value);
 
 /* A set of user-specified callbacks that can be used as a SAX-like parser interface.
  * Each callback can return a negative value to indicate an error to stop parsing early.
@@ -231,10 +233,10 @@ struct ply_handler {
 	int (*endElement)(void *userdata);
 	int (*startTuple)(void *userdata, unsigned long tupleIndex);
 	int (*endTuple)(void *userdata);
-	int (*onDatum)(void *userdata, PLY_PROPERTY property, union ply_datum value);
+	int (*onScalarValue)(void *userdata, PLY_PROPERTY property, union ply_scalar value);
 	int (*startList)(void *userdata, PLY_PROPERTY property, uint32_t length);
 	int (*endList)(void *userdata);
-	int (*onListItem)(void *userdata, union ply_datum value);
+	int (*onListItem)(void *userdata, union ply_scalar value);
 };
 
 /* Alternative, SAX-style parsing function.
@@ -564,49 +566,49 @@ ply_parser_get_element_by_name(const struct ply_parser *ply, const char *name)
 }
 
 static int
-ply_read_datum_ascii(const char *str, enum ply_type type, union ply_datum *datum)
+ply_read_scalar_ascii(const char *str, enum ply_type type, union ply_scalar *value)
 {
 	char *end;
 	switch (type) {
 	case PLY_TYPE_INT8:
-		datum->i = strtol(str, &end, 10);
-		if (datum->i < INT8_MIN) return PLY_ERR_SYNTAX;
-		if (datum->i > INT8_MAX) return PLY_ERR_SYNTAX;
+		value->i = strtol(str, &end, 10);
+		if (value->i < INT8_MIN) return PLY_ERR_SYNTAX;
+		if (value->i > INT8_MAX) return PLY_ERR_SYNTAX;
 		break;
 
 	case PLY_TYPE_UINT8:
-		datum->u = strtoul(str, &end, 10);
-		if (datum->u > UINT8_MAX) return PLY_ERR_SYNTAX;
+		value->u = strtoul(str, &end, 10);
+		if (value->u > UINT8_MAX) return PLY_ERR_SYNTAX;
 		break;
 
 	case PLY_TYPE_INT16:
-		datum->i = strtol(str, &end, 10);
-		if (datum->i < INT16_MIN) return PLY_ERR_SYNTAX;
-		if (datum->i > INT16_MAX) return PLY_ERR_SYNTAX;
+		value->i = strtol(str, &end, 10);
+		if (value->i < INT16_MIN) return PLY_ERR_SYNTAX;
+		if (value->i > INT16_MAX) return PLY_ERR_SYNTAX;
 		break;
 
 	case PLY_TYPE_UINT16:
-		datum->u = strtoul(str, &end, 10);
-		if (datum->u > UINT16_MAX) return PLY_ERR_SYNTAX;
+		value->u = strtoul(str, &end, 10);
+		if (value->u > UINT16_MAX) return PLY_ERR_SYNTAX;
 		break;
 
 	case PLY_TYPE_INT32:
-		datum->i = strtol(str, &end, 10);
-		if (datum->i < INT32_MIN) return PLY_ERR_SYNTAX;
-		if (datum->i > INT32_MAX) return PLY_ERR_SYNTAX;
+		value->i = strtol(str, &end, 10);
+		if (value->i < INT32_MIN) return PLY_ERR_SYNTAX;
+		if (value->i > INT32_MAX) return PLY_ERR_SYNTAX;
 		break;
 
 	case PLY_TYPE_UINT32:
-		datum->u = strtoul(str, &end, 10);
-		if (datum->u > UINT32_MAX) return PLY_ERR_SYNTAX;
+		value->u = strtoul(str, &end, 10);
+		if (value->u > UINT32_MAX) return PLY_ERR_SYNTAX;
 		break;
 	
 	case PLY_TYPE_FLOAT32:
-		datum->f = strtof(str, &end);
+		value->f = strtof(str, &end);
 		break;
 
 	case PLY_TYPE_FLOAT64:
-		datum->d = strtod(str, &end);
+		value->d = strtod(str, &end);
 		break;
 	
 	default:
@@ -618,35 +620,35 @@ ply_read_datum_ascii(const char *str, enum ply_type type, union ply_datum *datum
 }
 
 static int
-ply_read_datum_le(const unsigned char *raw, enum ply_type type, union ply_datum *datum)
+ply_read_scalar_le(const unsigned char *raw, enum ply_type type, union ply_scalar *value)
 {
 	uint64_t q;
 	switch (type) {
 	case PLY_TYPE_INT8:
-		datum->i  = (int32_t)raw[0];
+		value->i  = (int32_t)raw[0];
 		return 1;
 
 	case PLY_TYPE_UINT8:
-		datum->u  = (uint32_t)raw[0];
+		value->u  = (uint32_t)raw[0];
 		return 1;
 
 	case PLY_TYPE_INT16:
-		datum->i  = (int32_t)raw[0] << 0;
-		datum->i |= (int32_t)raw[1] << 8;
+		value->i  = (int32_t)raw[0] << 0;
+		value->i |= (int32_t)raw[1] << 8;
 		return 2;
 
 	case PLY_TYPE_UINT16:
-		datum->u  = (uint32_t)raw[0] << 0;
-		datum->u |= (uint32_t)raw[1] << 8;
+		value->u  = (uint32_t)raw[0] << 0;
+		value->u |= (uint32_t)raw[1] << 8;
 		return 2;
 
 	case PLY_TYPE_INT32:
 	case PLY_TYPE_UINT32:
 	case PLY_TYPE_FLOAT32:
-		datum->u  = (uint32_t)raw[0] <<  0;
-		datum->u |= (uint32_t)raw[1] <<  8;
-		datum->u |= (uint32_t)raw[2] << 16;
-		datum->u |= (uint32_t)raw[3] << 24;
+		value->u  = (uint32_t)raw[0] <<  0;
+		value->u |= (uint32_t)raw[1] <<  8;
+		value->u |= (uint32_t)raw[2] << 16;
+		value->u |= (uint32_t)raw[3] << 24;
 		return 4;
 	
 	case PLY_TYPE_FLOAT64:
@@ -658,7 +660,7 @@ ply_read_datum_le(const unsigned char *raw, enum ply_type type, union ply_datum 
 		q |= (uint64_t)raw[5] << 40;
 		q |= (uint64_t)raw[6] << 48;
 		q |= (uint64_t)raw[7] << 56;
-		datum->d = (double)q;
+		value->d = (double)q;
 		return 8;
 	
 	default:
@@ -667,35 +669,35 @@ ply_read_datum_le(const unsigned char *raw, enum ply_type type, union ply_datum 
 }
 
 static int
-ply_read_datum_be(const unsigned char *raw, enum ply_type type, union ply_datum *datum)
+ply_read_scalar_be(const unsigned char *raw, enum ply_type type, union ply_scalar *value)
 {
 	uint64_t q;
 	switch (type) {
 	case PLY_TYPE_INT8:
-		datum->i  = (int32_t)raw[0];
+		value->i  = (int32_t)raw[0];
 		return 1;
 
 	case PLY_TYPE_UINT8:
-		datum->u  = (uint32_t)raw[0];
+		value->u  = (uint32_t)raw[0];
 		return 1;
 
 	case PLY_TYPE_INT16:
-		datum->i  = (int32_t)raw[0] << 8;
-		datum->i |= (int32_t)raw[1] << 0;
+		value->i  = (int32_t)raw[0] << 8;
+		value->i |= (int32_t)raw[1] << 0;
 		return 2;
 
 	case PLY_TYPE_UINT16:
-		datum->u  = (uint32_t)raw[0] << 8;
-		datum->u |= (uint32_t)raw[1] << 0;
+		value->u  = (uint32_t)raw[0] << 8;
+		value->u |= (uint32_t)raw[1] << 0;
 		return 2;
 
 	case PLY_TYPE_INT32:
 	case PLY_TYPE_UINT32:
 	case PLY_TYPE_FLOAT32:
-		datum->u  = (uint32_t)raw[0] << 24;
-		datum->u |= (uint32_t)raw[1] << 16;
-		datum->u |= (uint32_t)raw[2] <<  8;
-		datum->u |= (uint32_t)raw[3] <<  0;
+		value->u  = (uint32_t)raw[0] << 24;
+		value->u |= (uint32_t)raw[1] << 16;
+		value->u |= (uint32_t)raw[2] <<  8;
+		value->u |= (uint32_t)raw[3] <<  0;
 		return 4;
 	
 	case PLY_TYPE_FLOAT64:
@@ -707,7 +709,7 @@ ply_read_datum_be(const unsigned char *raw, enum ply_type type, union ply_datum 
 		q |= (uint64_t)raw[5] << 16;
 		q |= (uint64_t)raw[6] <<  8;
 		q |= (uint64_t)raw[7] <<  0;
-		datum->d = (double)q;
+		value->d = (double)q;
 		return 8;
 	
 	default:
@@ -716,85 +718,85 @@ ply_read_datum_be(const unsigned char *raw, enum ply_type type, union ply_datum 
 }
 
 static int
-ply_read_datum(enum ply_format format, const char *raw, enum ply_type type, union ply_datum *datum)
+ply_read_scalar(enum ply_format format, const char *raw, enum ply_type type, union ply_scalar *value)
 {
 	switch (format) {
 	case PLY_FORMAT_ASCII:
-		return ply_read_datum_ascii(raw, type, datum);
+		return ply_read_scalar_ascii(raw, type, value);
 	
 	case PLY_FORMAT_BINARY_LITTLE_ENDIAN:
-		return ply_read_datum_le((const unsigned char *)raw, type, datum);
+		return ply_read_scalar_le((const unsigned char *)raw, type, value);
 	
 	case PLY_FORMAT_BINARY_BIG_ENDIAN:
-		return ply_read_datum_be((const unsigned char *)raw, type, datum);
+		return ply_read_scalar_be((const unsigned char *)raw, type, value);
 	
 	default:
 		return PLY_ERR_INTERNAL;
 	}
 }
 
-#define PLY_STORE_CAST_VALUE(destType, dest, dataType, datum)\
+#define PLY_STORE_CAST_VALUE(destType, dest, dataType, value)\
 	switch (dataType) {\
-		case PLY_TYPE_INT_:    dest = (destType)datum.i; break;\
-		case PLY_TYPE_UINT_:   dest = (destType)datum.u; break;\
-		case PLY_TYPE_FLOAT32: dest = (destType)datum.f; break;\
-		case PLY_TYPE_FLOAT64: dest = (destType)datum.d; break;\
+		case PLY_TYPE_INT_:    dest = (destType)value.i; break;\
+		case PLY_TYPE_UINT_:   dest = (destType)value.u; break;\
+		case PLY_TYPE_FLOAT32: dest = (destType)value.f; break;\
+		case PLY_TYPE_FLOAT64: dest = (destType)value.d; break;\
 	}
 
-union ply_datum
-ply_cast(enum ply_type desiredType, enum ply_type dataType, union ply_datum datum)
+union ply_scalar
+ply_cast(enum ply_type desiredType, enum ply_type dataType, union ply_scalar value)
 {
-	union ply_datum castDatum;
+	union ply_scalar castValue;
 	switch (desiredType) {
-	case PLY_TYPE_INT_:    PLY_STORE_CAST_VALUE(int32_t,  castDatum.i, dataType, datum); break;
-	case PLY_TYPE_UINT_:   PLY_STORE_CAST_VALUE(uint32_t, castDatum.u, dataType, datum); break;
-	case PLY_TYPE_FLOAT32: PLY_STORE_CAST_VALUE(float,    castDatum.f, dataType, datum); break;
-	case PLY_TYPE_FLOAT64: PLY_STORE_CAST_VALUE(double,   castDatum.d, dataType, datum); break;
+	case PLY_TYPE_INT_:    PLY_STORE_CAST_VALUE(int32_t,  castValue.i, dataType, value); break;
+	case PLY_TYPE_UINT_:   PLY_STORE_CAST_VALUE(uint32_t, castValue.u, dataType, value); break;
+	case PLY_TYPE_FLOAT32: PLY_STORE_CAST_VALUE(float,    castValue.f, dataType, value); break;
+	case PLY_TYPE_FLOAT64: PLY_STORE_CAST_VALUE(double,   castValue.d, dataType, value); break;
 	}
-	return castDatum;
+	return castValue;
 }
 
 #define PLY_NORMALIZE(v, min, max) ((v) < 0 ? -((v) / (min)) : (v) / (max))
 
-union ply_datum
-ply_cast_normalized(enum ply_type desiredType, enum ply_type dataType, union ply_datum datum)
+union ply_scalar
+ply_cast_normalized(enum ply_type desiredType, enum ply_type dataType, union ply_scalar value)
 {
-	union ply_datum castDatum;
+	union ply_scalar castValue;
 	switch (desiredType) {
-	case PLY_TYPE_INT_:    PLY_STORE_CAST_VALUE(int32_t,  castDatum.i, dataType, datum); break;
-	case PLY_TYPE_UINT_:   PLY_STORE_CAST_VALUE(uint32_t, castDatum.u, dataType, datum); break;
+	case PLY_TYPE_INT_:    PLY_STORE_CAST_VALUE(int32_t,  castValue.i, dataType, value); break;
+	case PLY_TYPE_UINT_:   PLY_STORE_CAST_VALUE(uint32_t, castValue.u, dataType, value); break;
 
 	case PLY_TYPE_FLOAT32:
 		switch (dataType) {
-		case PLY_TYPE_INT8:    castDatum.f = PLY_NORMALIZE((float)datum.i, INT8_MIN,  INT8_MAX);  break;
-		case PLY_TYPE_INT16:   castDatum.f = PLY_NORMALIZE((float)datum.i, INT16_MIN, INT16_MAX); break;
-		case PLY_TYPE_INT32:   castDatum.f = PLY_NORMALIZE((float)datum.i, INT32_MIN, INT32_MAX); break;
+		case PLY_TYPE_INT8:    castValue.f = PLY_NORMALIZE((float)value.i, INT8_MIN,  INT8_MAX);  break;
+		case PLY_TYPE_INT16:   castValue.f = PLY_NORMALIZE((float)value.i, INT16_MIN, INT16_MAX); break;
+		case PLY_TYPE_INT32:   castValue.f = PLY_NORMALIZE((float)value.i, INT32_MIN, INT32_MAX); break;
 
-		case PLY_TYPE_UINT8:   castDatum.f = (float)datum.u / UINT8_MAX;  break;
-		case PLY_TYPE_UINT16:  castDatum.f = (float)datum.u / UINT16_MAX; break;
-		case PLY_TYPE_UINT32:  castDatum.f = (float)datum.u / UINT32_MAX; break;
+		case PLY_TYPE_UINT8:   castValue.f = (float)value.u / UINT8_MAX;  break;
+		case PLY_TYPE_UINT16:  castValue.f = (float)value.u / UINT16_MAX; break;
+		case PLY_TYPE_UINT32:  castValue.f = (float)value.u / UINT32_MAX; break;
 
-		case PLY_TYPE_FLOAT32: castDatum.f = (float)datum.f; break;
-		case PLY_TYPE_FLOAT64: castDatum.f = (float)datum.d; break;
+		case PLY_TYPE_FLOAT32: castValue.f = (float)value.f; break;
+		case PLY_TYPE_FLOAT64: castValue.f = (float)value.d; break;
 		}
 		break;
 	
 	case PLY_TYPE_FLOAT64:
 		switch (dataType) {
-		case PLY_TYPE_INT8:    castDatum.d = PLY_NORMALIZE((double)datum.i, INT8_MIN,  INT8_MAX);  break;
-		case PLY_TYPE_INT16:   castDatum.d = PLY_NORMALIZE((double)datum.i, INT16_MIN, INT16_MAX); break;
-		case PLY_TYPE_INT32:   castDatum.d = PLY_NORMALIZE((double)datum.i, INT32_MIN, INT32_MAX); break;
+		case PLY_TYPE_INT8:    castValue.d = PLY_NORMALIZE((double)value.i, INT8_MIN,  INT8_MAX);  break;
+		case PLY_TYPE_INT16:   castValue.d = PLY_NORMALIZE((double)value.i, INT16_MIN, INT16_MAX); break;
+		case PLY_TYPE_INT32:   castValue.d = PLY_NORMALIZE((double)value.i, INT32_MIN, INT32_MAX); break;
 
-		case PLY_TYPE_UINT8:   castDatum.d = (double)datum.u / UINT8_MAX;  break;
-		case PLY_TYPE_UINT16:  castDatum.d = (double)datum.u / UINT16_MAX; break;
-		case PLY_TYPE_UINT32:  castDatum.d = (double)datum.u / UINT32_MAX; break;
+		case PLY_TYPE_UINT8:   castValue.d = (double)value.u / UINT8_MAX;  break;
+		case PLY_TYPE_UINT16:  castValue.d = (double)value.u / UINT16_MAX; break;
+		case PLY_TYPE_UINT32:  castValue.d = (double)value.u / UINT32_MAX; break;
 
-		case PLY_TYPE_FLOAT32: castDatum.d = (double)datum.f; break;
-		case PLY_TYPE_FLOAT64: castDatum.d = (double)datum.d; break;
+		case PLY_TYPE_FLOAT32: castValue.d = (double)value.f; break;
+		case PLY_TYPE_FLOAT64: castValue.d = (double)value.d; break;
 		}
 		break;
 	}
-	return castDatum;
+	return castValue;
 }
 
 // FIXME support #elems = 0 or #props = 0 or #tuples = 0
@@ -860,32 +862,32 @@ ply_advance(struct ply_parser *ply)
 }
 
 int
-ply_stream_value(struct ply_parser *ply, union ply_datum *datum)
+ply_stream_value(struct ply_parser *ply, union ply_scalar *value)
 {
 	int r = ply_advance(ply);
 	if (r < 0) return r;
 
 	if (ply->currentProperty->isList) {
-		union ply_datum indexDatum;
-		r = ply_read_datum(ply->format, ply->memory + ply->bufferOffset,
-			ply->currentProperty->indexType, &indexDatum);
+		union ply_scalar lengthValue;
+		r = ply_read_scalar(ply->format, ply->memory + ply->bufferOffset,
+			ply->currentProperty->indexType, &lengthValue);
 		if (r < 0) return r;
 		ply->bufferOffset += r;
 
 		unsigned listLength;
 		switch (ply->currentProperty->indexType) {
 		case PLY_TYPE_INT_:
-			if (indexDatum.i < 0) return PLY_ERR_SYNTAX;
-			listLength = (unsigned)indexDatum.i;
+			if (lengthValue.i < 0) return PLY_ERR_SYNTAX;
+			listLength = (unsigned)lengthValue.i;
 			break;
-		case PLY_TYPE_UINT_: listLength = indexDatum.u; break;
+		case PLY_TYPE_UINT_: listLength = lengthValue.u; break;
 		default: return PLY_ERR_SYNTAX;
 		}
-		datum->u = listLength;
+		value->u = listLength;
 		ply->currentItem = 0;
 	} else {
-		r = ply_read_datum(ply->format, ply->memory + ply->bufferOffset,
-			ply->currentProperty->dataType, datum);
+		r = ply_read_scalar(ply->format, ply->memory + ply->bufferOffset,
+			ply->currentProperty->dataType, value);
 		if (r < 0) return r;
 		ply->bufferOffset += r;
 	}
@@ -894,11 +896,11 @@ ply_stream_value(struct ply_parser *ply, union ply_datum *datum)
 }
 
 int
-ply_stream_list_item(struct ply_parser *ply, union ply_datum *datum)
+ply_stream_list_item(struct ply_parser *ply, union ply_scalar *value)
 {
 	int r;
-	r = ply_read_datum(ply->format, ply->memory + ply->bufferOffset,
-		ply->currentProperty->dataType, datum);
+	r = ply_read_scalar(ply->format, ply->memory + ply->bufferOffset,
+		ply->currentProperty->dataType, value);
 	if (r < 0) return r;
 	ply->bufferOffset += r;
 
@@ -930,18 +932,18 @@ ply_process_with_callbacks(struct ply_parser *ply, const struct ply_handler *han
 
 			PLY_PROPERTY property = element->properties;
 			while (property) {
-				union ply_datum datum;
-				r = ply_stream_value(ply, &datum);
+				union ply_scalar value;
+				r = ply_stream_value(ply, &value);
 				if (r < 0) return r;
 
 				if (property->isList) {
 					if (handler->startList) {
-						r = handler->startList(userdata, property, datum.u);
+						r = handler->startList(userdata, property, value.u);
 						if (r < 0) return r;
 					}
 
-					union ply_datum item;
-					for (unsigned long i = 0; i < datum.u; i++) {
+					union ply_scalar item;
+					for (unsigned long i = 0; i < value.u; i++) {
 						r = ply_stream_list_item(ply, &item);
 						if (r < 0) return r;
 
@@ -956,8 +958,8 @@ ply_process_with_callbacks(struct ply_parser *ply, const struct ply_handler *han
 						if (r < 0) return r;
 					}
 				} else {
-					if (handler->onDatum) {
-						r = handler->onDatum(userdata, property, datum);
+					if (handler->onScalarValue) {
+						r = handler->onScalarValue(userdata, property, value);
 						if (r < 0) return r;
 					}
 				}

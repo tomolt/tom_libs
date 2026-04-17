@@ -52,28 +52,28 @@ end_tuple(void *userdata)
 }
 
 int
-on_datum(void *userdata, PLY_PROPERTY property, union ply_datum datum)
+on_scalar_value(void *userdata, PLY_PROPERTY property, union ply_scalar value)
 {
 	(void)userdata;
 	switch (ply_property_get_data_type(property)) {
 	case PLY_TYPE_INT8:
 	case PLY_TYPE_INT16:
 	case PLY_TYPE_INT32:
-		printf("%"PRId32", ", datum.i);
+		printf("%"PRId32", ", value.i);
 		break;
 
 	case PLY_TYPE_UINT8:
 	case PLY_TYPE_UINT16:
 	case PLY_TYPE_UINT32:
-		printf("%"PRIu32", ", datum.u);
+		printf("%"PRIu32", ", value.u);
 		break;
 
 	case PLY_TYPE_FLOAT32:
-		printf("%f, ", datum.f);
+		printf("%f, ", value.f);
 		break;
 
 	case PLY_TYPE_FLOAT64:
-		printf("%lf, ", datum.d);
+		printf("%lf, ", value.d);
 		break;
 	}
 	return 0;
@@ -108,42 +108,42 @@ end_list(void *userdata)
 }
 
 int
-on_list_item(void *userdata, union ply_datum datum)
+on_list_item(void *userdata, union ply_scalar value)
 {
 	(void)userdata;
 	switch (itemType) {
 	case PLY_TYPE_INT8:
 	case PLY_TYPE_INT16:
 	case PLY_TYPE_INT32:
-		printf("%"PRId32", ", datum.i);
+		printf("%"PRId32", ", value.i);
 		break;
 
 	case PLY_TYPE_UINT8:
 	case PLY_TYPE_UINT16:
 	case PLY_TYPE_UINT32:
-		printf("%"PRIu32", ", datum.u);
+		printf("%"PRIu32", ", value.u);
 		break;
 
 	case PLY_TYPE_FLOAT32:
-		printf("%f, ", datum.f);
+		printf("%f, ", value.f);
 		break;
 
 	case PLY_TYPE_FLOAT64:
-		printf("%lf, ", datum.d);
+		printf("%lf, ", value.d);
 		break;
 	}
 	return 0;
 }
 
 const struct ply_handler my_handler = {
-	.startElement = start_element,
-	.endElement   = end_element,
-	.startTuple   = start_tuple,
-	.endTuple     = end_tuple,
-	.onDatum      = on_datum,
-	.startList    = start_list,
-	.endList      = end_list,
-	.onListItem   = on_list_item,
+	.startElement  = start_element,
+	.endElement    = end_element,
+	.startTuple    = start_tuple,
+	.endTuple      = end_tuple,
+	.onScalarValue = on_scalar_value,
+	.startList     = start_list,
+	.endList       = end_list,
+	.onListItem    = on_list_item,
 };
 
 int
