@@ -227,11 +227,19 @@ main(int argc, const char **argv)
 			while (property) {
 				union ply_datum datum;
 				s = ply_stream_value(&ply, &datum);
+				if (s < 0) {
+					fprintf(stderr, "Error while streaming values\n");
+					return -1;
+				}
 				if (ply_property_is_list(property)) {
 					my_handler.startList(NULL, property, datum.u);
 					union ply_datum item;
 					for (unsigned long i = 0; i < datum.u; i++) {
 						s = ply_stream_list_item(&ply, &item);
+						if (s < 0) {
+							fprintf(stderr, "Error inside list\n");
+							return -1;
+						}
 						my_handler.onListItem(NULL, item);
 					}
 					my_handler.endList(NULL);

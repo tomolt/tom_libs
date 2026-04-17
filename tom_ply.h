@@ -601,6 +601,21 @@ ply_read_datum_le(const unsigned char *raw, enum ply_type type, union ply_datum 
 	}
 }
 
+static int
+ply_read_datum(enum ply_format format, const char *raw, enum ply_type type, union ply_datum *datum)
+{
+	switch (format) {
+	case PLY_FORMAT_ASCII:
+		return ply_read_datum_ascii(raw, type, datum);
+	
+	case PLY_FORMAT_BINARY_LITTLE_ENDIAN:
+		return ply_read_datum_le((const unsigned char *)raw, type, datum);
+	
+	default:
+		return PLY_ERR_INTERNAL;
+	}
+}
+
 #define PLY_STORE_CAST_VALUE(destType, dest, dataType, datum)\
 	switch (dataType) {\
 		case PLY_TYPE_INT_:    dest = (destType)datum.i; break;\
@@ -709,8 +724,15 @@ ply_advance(struct ply_parser *ply)
 		}
 		ply->currentProperty = ply->currentElement->properties;
 
-		ply->lineLength -= ply->offset + 1;
-		memmove(ply->line, ply->line + ply->offset + 1, ply->lineLength);
+		if (ply->format == PLY_FORMAT_ASCII) {
+			if (ply->line[ply->offset] != '\n') {
+				return PLY_ERR_SYNTAX;
+			}
+			ply->offset++;
+		}
+		
+		ply->lineLength -= ply->offset;
+		memmove(ply->line, ply->line + ply->offset, ply->lineLength);
 		ply->offset = 0;
 
 		int r = ply->readFunc(ply->readData, ply->line + ply->lineLength, PLY_MAX_LINE - ply->lineLength);
@@ -723,12 +745,13 @@ ply_advance(struct ply_parser *ply)
 int
 ply_stream_value(struct ply_parser *ply, union ply_datum *datum)
 {
-	ply_advance(ply);
+	int r = ply_advance(ply);
+	if (r < 0) return r;
 
-	int r;
 	if (ply->currentProperty->isList) {
 		union ply_datum indexDatum;
-		r = ply_read_datum_ascii(ply->line + ply->offset, ply->currentProperty->dataType, &indexDatum);
+		r = ply_read_datum(ply->format, ply->line + ply->offset,
+			ply->currentProperty->indexType, &indexDatum);
 		if (r < 0) return r;
 		ply->offset += r;
 
@@ -744,7 +767,8 @@ ply_stream_value(struct ply_parser *ply, union ply_datum *datum)
 		datum->u = listLength;
 		ply->currentItem = 0;
 	} else {
-		r = ply_read_datum_ascii(ply->line + ply->offset, ply->currentProperty->dataType, datum);
+		r = ply_read_datum(ply->format, ply->line + ply->offset,
+			ply->currentProperty->dataType, datum);
 		if (r < 0) return r;
 		ply->offset += r;
 	}
@@ -756,7 +780,8 @@ int
 ply_stream_list_item(struct ply_parser *ply, union ply_datum *datum)
 {
 	int r;
-	r = ply_read_datum_ascii(ply->line + ply->offset, ply->currentProperty->dataType, datum);
+	r = ply_read_datum(ply->format, ply->line + ply->offset,
+		ply->currentProperty->dataType, datum);
 	if (r < 0) return r;
 	ply->offset += r;
 
