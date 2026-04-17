@@ -1,4 +1,5 @@
 /* tom_ply.h: Zero-Allocation PLY parser
+ * version: 1.0
  *
  * Copyright (C) 2026 Thomas Oltmann
  *
@@ -32,7 +33,6 @@
 #define _TOM_PLY_H_
 
 #include <stdint.h>
-#include <stdbool.h>
 
 #define PLY_MIN_BUFFER_CAPACITY 1024
 #define PLY_MAX_NAME 32
@@ -249,10 +249,8 @@ int  ply_process_with_callbacks(struct ply_parser *ply, const struct ply_handler
 
 #ifdef PLY_IMPLEMENTATION
 
-#include <stdlib.h>
-#include <string.h>
-
-#include <limits.h>
+#include <stdlib.h> // strtof(), strtod(), strtol(), strtoul()
+#include <string.h> // memcmp(), strcmp(), memmove(), memset()
 
 /* These macros are short-hands for longer case-lists inside switch statements.
  * They are really ugly, but at least they play well with auto-formatting ...
@@ -753,7 +751,7 @@ int
 ply_start_streaming(struct ply_parser *ply)
 {
 	ply->currentElement  = NULL;
-	ply->currentTuple    = ULONG_MAX;
+	ply->currentTuple    = (unsigned long)-1;
 	ply->currentProperty = NULL;
 	ply->currentItem     = 0;
 	ply->bufferOffset    = 0;
