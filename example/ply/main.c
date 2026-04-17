@@ -226,13 +226,12 @@ main(int argc, const char **argv)
 			PLY_PROPERTY property = element->properties;
 			while (property) {
 				union ply_datum datum;
-				s = ply_advance(&ply);
 				s = ply_stream_value(&ply, &datum);
 				if (ply_property_is_list(property)) {
 					my_handler.startList(NULL, property, datum.u);
 					union ply_datum item;
 					for (unsigned long i = 0; i < datum.u; i++) {
-						s = ply_stream_value(&ply, &item);
+						s = ply_stream_list_item(&ply, &item);
 						my_handler.onListItem(NULL, item);
 					}
 					my_handler.endList(NULL);
