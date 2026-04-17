@@ -216,6 +216,36 @@ main(int argc, const char **argv)
 		printf("};\n\n");
 	}
 
+#if 1
+	ply_parser_start_streaming(&ply);
+	for (unsigned long e = 0; e < ply_parser_get_element_count(&ply); e++) {
+		PLY_ELEMENT element = ply_parser_get_element(&ply, e);
+		my_handler.startElement(NULL, element);
+		for (unsigned long t = 0; t < ply_element_get_tuple_count(element); t++) {
+			my_handler.startTuple(NULL, t);
+			PLY_PROPERTY property = element->properties;
+			while (property) {
+				union ply_datum datum;
+				s = ply_stream_value(&ply, &datum);
+				if (ply_property_is_list(property)) {
+					my_handler.startList(NULL, property, datum.u);
+					union ply_datum item;
+					for (unsigned long i = 0; i < datum.u; i++) {
+						s = ply_stream_value(&ply, &item);
+						my_handler.onListItem(NULL, item);
+					}
+					my_handler.endList(NULL);
+				} else {
+					my_handler.onDatum(NULL, property, datum);
+				}
+				ply_advance(&ply);
+				property = property->next;
+			}
+			my_handler.endTuple(NULL);
+		}
+		my_handler.endElement(NULL);
+	}
+#else
 	s = ply_parse_contents(&ply);
 	if (s < 0) {
 		fclose(plyFile);
@@ -223,6 +253,7 @@ main(int argc, const char **argv)
 		fprintf(stderr, "can't parse ply contents\n");
 		return 1;
 	}
+#endif
 
 	printf("#endif\n");
 

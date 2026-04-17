@@ -96,6 +96,14 @@ struct ply_parser {
 	// TODO fold this into the workArea
 	char line[PLY_MAX_LINE];
 	unsigned lineLength;
+
+	// For the streaming API
+	PLY_ELEMENT   currentElement;
+	unsigned long currentTuple;
+	PLY_PROPERTY  currentProperty;
+	unsigned long currentItem;
+	char         *tokenState;
+	char         *nextLine;
 };
 
 static inline const char *
@@ -143,12 +151,19 @@ PLY_ELEMENT          ply_parser_get_element_by_name(const struct ply_parser *ply
 union ply_datum      ply_cast(enum ply_type desiredType, enum ply_type dataType, union ply_datum datum);
 union ply_datum      ply_cast_normalized(enum ply_type desiredType, enum ply_type dataType, union ply_datum datum);
 
+int  ply_parser_start_streaming(struct ply_parser *ply);
+int  ply_stream_value(struct ply_parser *ply, union ply_datum *datum);
+int  ply_stream_list_item(struct ply_parser *ply, union ply_datum *datum);
+int  ply_advance(struct ply_parser *ply);
+
 #endif
 
 #ifdef PLY_IMPLEMENTATION
 
 #include <stdlib.h>
 #include <string.h>
+
+#include <limits.h>
 
 /* These macros are short-hands for longer case-lists inside switch statements.
  * They are really ugly, but at least they play well with auto-formatting ...
@@ -871,26 +886,114 @@ ply_cast_normalized(enum ply_type desiredType, enum ply_type dataType, union ply
 	return castDatum;
 }
 
+// FIXME support #elems = 0 or #props = 0 or #tuples = 0
+
+int
+ply_parser_start_streaming(struct ply_parser *ply)
+{
+	ply->currentElement  = ply->elements;
+	ply->currentTuple    = 0;
+	ply->currentProperty = ply->elements->properties;
+	ply->currentItem     = 0;
+	ply->tokenState      = ply->line;
+
+	int r = ply->readFunc(ply->readData, ply->line + ply->lineLength, PLY_MAX_LINE - ply->lineLength);
+	if (r < 0) return PLY_ERR_READ;
+	ply->lineLength += (unsigned)r;
+
+	ply->nextLine = strchr(ply->line, '\n');
+	if (!ply->nextLine) return PLY_ERR_SYNTAX;
+	*ply->nextLine = 0;
+	ply->tokenState = ply->line;
+
+	return 0;
+}
+
+int
+ply_stream_value(struct ply_parser *ply, union ply_datum *datum)
+{
+	char *token = ply_next_token(&ply->tokenState, ' ');
+	if (!token) return PLY_ERR_SYNTAX;
+
+	int r;
+	if (ply->currentProperty->isList) {
+		union ply_datum indexDatum;
+		r = ply_read_datum_ascii(token, ply->currentProperty->dataType, &indexDatum);
+		if (r < 0) return r;
+
+		unsigned listLength;
+		switch (ply->currentProperty->indexType) {
+		case PLY_TYPE_INT_:
+			if (indexDatum.i < 0) return PLY_ERR_SYNTAX;
+			listLength = (unsigned)indexDatum.i;
+			break;
+		case PLY_TYPE_UINT_: listLength = indexDatum.u; break;
+		default: return PLY_ERR_SYNTAX;
+		}
+		datum->u = listLength;
+		ply->currentItem = 0;
+	} else {
+		r = ply_read_datum_ascii(token, ply->currentProperty->dataType, datum);
+		if (r < 0) return r;
+	}
+
+	return 0;
+}
+
+int
+ply_stream_list_item(struct ply_parser *ply, union ply_datum *datum)
+{
+	char *token = ply_next_token(&ply->tokenState, ' ');
+	if (!token) return PLY_ERR_SYNTAX;
+
+	int r;
+	r = ply_read_datum_ascii(token, ply->currentProperty->dataType, datum);
+	if (r < 0) return r;
+
+	// Advance to the next list item
+	ply->currentItem++;
+	// TODO don't run over the end of the list
+
+	return 0;
+}
+
+int
+ply_advance(struct ply_parser *ply)
+{
+	// Advance to the next (element, tuple, property)
+	ply->currentProperty = ply->currentProperty->next;
+	if (!ply->currentProperty) {
+		// TODO make sure there aren't extraneous tokens at the end of the line
+
+		ply->currentTuple++;
+		if (ply->currentTuple >= ply->currentElement->numTuples) {
+			ply->currentElement = ply->currentElement->next;
+			if (!ply->currentElement) {
+				return -1; // TODO
+			}
+			ply->currentTuple = 0;
+		}
+		ply->currentProperty = ply->currentElement->properties;
+
+		ply->lineLength -= ply->nextLine + 1 - ply->line;
+		memmove(ply->line, ply->nextLine + 1, ply->lineLength);
+
+		int r = ply->readFunc(ply->readData, ply->line + ply->lineLength, PLY_MAX_LINE - ply->lineLength);
+		if (r < 0) return PLY_ERR_READ;
+		ply->lineLength += (unsigned)r;
+
+		ply->nextLine = strchr(ply->line, '\n');
+		if (!ply->nextLine) return PLY_ERR_SYNTAX;
+		*ply->nextLine = 0;
+		ply->tokenState = ply->line;
+	}
+	return 0;
+}
+
 #undef PLY_STORE_CAST_VALUE
 #undef PLY_NORMALIZE
 #undef PLY_TYPE_INT_
 #undef PLY_TYPE_UINT_
 #undef PLY_TYPE_FLOAT_
-
-/*
-
-Concept for stream-based API:
-
-ply_stream_element();
-
-ply_stream_tuple();
-
-ply_stream_datum();
-
-ply_stream_list();
-
-ply_stream_list_item();
-
- */
 
 #endif
