@@ -86,13 +86,10 @@ struct ply_parser {
 	char  *workArea;
 	size_t workSize;
 	size_t workBreak;
+	size_t bufferFill;
 
 	ply_read_callback readFunc;
 	void             *readData;
-
-	// TODO fold this into the workArea
-	char line[PLY_MAX_LINE];
-	unsigned lineLength;
 
 	// For the streaming API
 	PLY_ELEMENT   currentElement;
@@ -195,7 +192,7 @@ ply_parser_reset(struct ply_parser *ply)
 	ply->elementsTail = NULL;
 	ply->propertiesTail = NULL;
 	ply->numElements = 0;
-	ply->lineLength = 0;
+	ply->bufferFill = 0;
 
 	ply->workBreak  = ply->workSize;
 	ply->workBreak &= ~(size_t)0xF;
@@ -207,7 +204,7 @@ ply_parser_set_input(struct ply_parser *ply, ply_read_callback readFunc, void *r
 	ply->readFunc = readFunc;
 	ply->readData = readData;
 
-	ply->lineLength = 0;
+	ply->bufferFill = 0;
 }
 
 void
@@ -390,15 +387,15 @@ ply_parse_header_line(struct ply_parser *ply, char *line)
 int
 ply_parse_header(struct ply_parser *ply)
 {
-	int r = ply->readFunc(ply->readData, ply->line, PLY_MAX_LINE);
+	int r = ply->readFunc(ply->readData, ply->workArea, PLY_MAX_LINE);
 	if (r < 0) return PLY_ERR_READ;
-	ply->lineLength = (unsigned)r;
+	ply->bufferFill = r;
 
-	if (ply->lineLength < 4 || !!memcmp(ply->line, "ply\n", 4)) {
+	if (ply->bufferFill < 4 || !!memcmp(ply->workArea, "ply\n", 4)) {
 		return PLY_ERR_SYNTAX;
 	}
-	ply->lineLength -= 4;
-	memmove(ply->line, ply->line + 4, ply->lineLength);
+	ply->bufferFill -= 4;
+	memmove(ply->workArea, ply->workArea + 4, ply->bufferFill);
 
 	ply->format = PLY_FORMAT_UNKNOWN;
 	ply->elements = NULL;
@@ -408,19 +405,19 @@ ply_parse_header(struct ply_parser *ply)
 
 	for (;;) {
 		int r = ply->readFunc(ply->readData,
-			ply->line + ply->lineLength, PLY_MAX_LINE - ply->lineLength);
+			ply->workArea + ply->bufferFill, PLY_MAX_LINE - ply->bufferFill);
 		if (r < 0) return PLY_ERR_READ;
-		ply->lineLength += (unsigned)r;
+		ply->bufferFill += r;
 
-		char *nl = strchr(ply->line, '\n');
+		char *nl = strchr(ply->workArea, '\n');
 		if (!nl) return PLY_ERR_SYNTAX;
 		*nl = 0;
 
-		int s = ply_parse_header_line(ply, ply->line);
+		int s = ply_parse_header_line(ply, ply->workArea);
 		if (s < 0) return s;
 
-		ply->lineLength -= nl + 1 - ply->line;
-		memmove(ply->line, nl + 1, ply->lineLength);
+		ply->bufferFill -= nl + 1 - ply->workArea;
+		memmove(ply->workArea, nl + 1, ply->bufferFill);
 
 		if (s == 0) break;
 	}
@@ -678,9 +675,9 @@ ply_advance(struct ply_parser *ply)
 		ply->currentProperty = ply->currentElement->properties;
 		ply->currentItem     = 0;
 
-		int r = ply->readFunc(ply->readData, ply->line + ply->lineLength, PLY_MAX_LINE - ply->lineLength);
+		int r = ply->readFunc(ply->readData, ply->workArea + ply->bufferFill, ply->workBreak - ply->bufferFill);
 		if (r < 0) return PLY_ERR_READ;
-		ply->lineLength += (unsigned)r;
+		ply->bufferFill += r;
 
 		return 0;
 	}
@@ -701,19 +698,19 @@ ply_advance(struct ply_parser *ply)
 		ply->currentProperty = ply->currentElement->properties;
 
 		if (ply->format == PLY_FORMAT_ASCII) {
-			if (ply->line[ply->offset] != '\n') {
+			if (ply->workArea[ply->offset] != '\n') {
 				return PLY_ERR_SYNTAX;
 			}
 			ply->offset++;
 		}
 		
-		ply->lineLength -= ply->offset;
-		memmove(ply->line, ply->line + ply->offset, ply->lineLength);
+		ply->bufferFill -= ply->offset;
+		memmove(ply->workArea, ply->workArea + ply->offset, ply->bufferFill);
 		ply->offset = 0;
 
-		int r = ply->readFunc(ply->readData, ply->line + ply->lineLength, PLY_MAX_LINE - ply->lineLength);
+		int r = ply->readFunc(ply->readData, ply->workArea + ply->bufferFill, ply->workBreak - ply->bufferFill);
 		if (r < 0) return PLY_ERR_READ;
-		ply->lineLength += (unsigned)r;
+		ply->bufferFill += r;
 	}
 	return 0;
 }
@@ -726,7 +723,7 @@ ply_stream_value(struct ply_parser *ply, union ply_datum *datum)
 
 	if (ply->currentProperty->isList) {
 		union ply_datum indexDatum;
-		r = ply_read_datum(ply->format, ply->line + ply->offset,
+		r = ply_read_datum(ply->format, ply->workArea + ply->offset,
 			ply->currentProperty->indexType, &indexDatum);
 		if (r < 0) return r;
 		ply->offset += r;
@@ -743,7 +740,7 @@ ply_stream_value(struct ply_parser *ply, union ply_datum *datum)
 		datum->u = listLength;
 		ply->currentItem = 0;
 	} else {
-		r = ply_read_datum(ply->format, ply->line + ply->offset,
+		r = ply_read_datum(ply->format, ply->workArea + ply->offset,
 			ply->currentProperty->dataType, datum);
 		if (r < 0) return r;
 		ply->offset += r;
@@ -756,7 +753,7 @@ int
 ply_stream_list_item(struct ply_parser *ply, union ply_datum *datum)
 {
 	int r;
-	r = ply_read_datum(ply->format, ply->line + ply->offset,
+	r = ply_read_datum(ply->format, ply->workArea + ply->offset,
 		ply->currentProperty->dataType, datum);
 	if (r < 0) return r;
 	ply->offset += r;
