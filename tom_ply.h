@@ -102,17 +102,16 @@ struct ply_element {
 	struct ply_element   *next;
 	char                  name[PLY_MAX_NAME];
 	unsigned long         numTuples;
-	//TODO count properties in elements
-	//unsigned long         numProperties;
 	struct ply_property  *properties;
+	struct ply_property  *lastProperty;
+	unsigned long         numProperties;
 };
 
 struct ply_parser {
 	// Information extracted from the header
 	enum ply_format       format;
 	struct ply_element   *elements;
-	struct ply_element  **elementsTail;
-	struct ply_property **propertiesTail;
+	struct ply_element   *lastElement;
 	unsigned long         numElements;
 
 	// Some work memory provided by the application.
@@ -162,6 +161,8 @@ static inline const char *
 ply_element_get_name(PLY_ELEMENT element) { return element->name; }
 static inline unsigned long
 ply_element_get_tuple_count(PLY_ELEMENT element) { return element->numTuples; }
+static inline unsigned long
+ply_element_get_property_count(PLY_ELEMENT element) { return element->numProperties; }
 static inline unsigned long
 ply_parser_get_element_count(struct ply_parser *ply) { return ply->numElements; }
 static inline enum ply_format
@@ -394,10 +395,12 @@ ply_parse_element(struct ply_parser *ply, char **tokenState)
 	element->numTuples = strtoul(token, &end, 10);
 	if (*end) return PLY_ERR_SYNTAX;
 
-	element->next = *ply->elementsTail;
-	*ply->elementsTail = element;
-	ply->elementsTail = &element->next;
-	ply->propertiesTail = &element->properties;
+	if (ply->elements) {
+		ply->lastElement->next = element;
+	} else {
+		ply->elements = element;
+	}
+	ply->lastElement = element;
 	ply->numElements++;
 
 	return 0;
@@ -406,7 +409,7 @@ ply_parse_element(struct ply_parser *ply, char **tokenState)
 static int
 ply_parse_property(struct ply_parser *ply, char **tokenState)
 {
-	if (!ply->propertiesTail) return PLY_ERR_SYNTAX;
+	if (!ply->lastElement) return PLY_ERR_SYNTAX;
 
 	struct ply_property *property = ply_reserve(ply, sizeof *property);
 
@@ -439,9 +442,14 @@ ply_parse_property(struct ply_parser *ply, char **tokenState)
 
 	strncpy(property->name, token, PLY_MAX_NAME - 1);
 
-	property->next = *ply->propertiesTail;
-	*ply->propertiesTail = property;
-	ply->propertiesTail = &property->next;
+	struct ply_element *element = ply->lastElement;
+	if (element->properties) {
+		element->lastProperty->next = property;
+	} else {
+		element->properties = property;
+	}
+	element->lastProperty = property;
+	element->numProperties++;
 
 	return 0;
 }
@@ -483,8 +491,7 @@ ply_process_header(struct ply_parser *ply)
 	// Reset our data structures
 	ply->format         = PLY_FORMAT_UNKNOWN;
 	ply->elements       = NULL;
-	ply->elementsTail   = &ply->elements;
-	ply->propertiesTail = NULL;
+	ply->lastElement    = NULL;
 	ply->numElements    = 0;
 	ply->bufferFill     = 0;
 
