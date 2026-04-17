@@ -1,6 +1,31 @@
 /* tom_ply.h: Zero-Allocation PLY parser
  *
  * Copyright (C) 2026 Thomas Oltmann
+ *
+ * WHY USE THE PLY FORMAT?
+ *
+ * PLY is a ubiquitous and well-established format for 3D geometry.
+ * It is more versatile than OBJ, and the way it implements indexing
+ * maps more directly to the way graphics hardware works.
+ * PLY is entirely descriptive unlike glTF,
+ * which dictates the way you need to lay out your buffers and render pipelines.
+ *
+ * HOW FAST IS THIS IMPLEMENTATION?
+ *
+ * Hard to say. PLY as a format does not lend itself well to fast load times.
+ * If your application requires fast disk loads, I recommend you design your
+ * own in-house mesh representation. You should prefer fixed, well-defined layouts,
+ * and a structure-of-arrays approach.
+ * The PLY file format allows too much variation to be processed in bulk effectively.
+ *
+ * HOW MUCH MEMORY DOES THIS IMPLEMENTATION USE?
+ * 
+ * Simple, as much as you give it, and none more.
+ * Though practically, you should give it at least a buffer of two kilobytes or so.
+ * A nice consequence of this design is that you do not need to call
+ * a function to release PLY resources when you are done;
+ * You can simply repurpose the memory that you gave it.
+ *
  */
 
 #ifndef _TOM_PLY_H_
@@ -9,15 +34,22 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define PLY_MAX_LINE 1024
+#define PLY_MIN_BUFFER_CAPACITY 1024
 #define PLY_MAX_NAME 32
 
-#define PLY_ERR_SPACE    -100
-#define PLY_ERR_LIMIT    -200
-#define PLY_ERR_READ     -300
-#define PLY_ERR_SYNTAX   -400
-#define PLY_ERR_INTERNAL -500
+#define PLY_ERR_SPACE    -110
+#define PLY_ERR_LIMIT    -120
+#define PLY_ERR_READ     -130
+#define PLY_ERR_SYNTAX   -140
+#define PLY_ERR_INTERNAL -150
 
+/* A callback function to read a chunk of data from the input.
+ * readData is user-specified pointer that can be used to store some context (e.g. a FILE pointer).
+ * The data is to be stored in the provided buffer.
+ * Up to max bytes may be read.
+ * The function either returns the number of bytes read, or a negative value indicating an error
+ * (any negative value can be chosen).
+ */
 typedef int (*ply_read_callback)(void *readData, void *buffer, unsigned max);
 
 enum ply_type {
@@ -41,17 +73,6 @@ union ply_datum {
 typedef const struct ply_property *PLY_PROPERTY;
 typedef const struct ply_element  *PLY_ELEMENT;
 
-struct ply_handler {
-	bool (*startElement)(void *userdata, PLY_ELEMENT element);
-	bool (*endElement)(void *userdata);
-	bool (*startTuple)(void *userdata, unsigned long tupleIndex);
-	bool (*endTuple)(void *userdata);
-	bool (*onDatum)(void *userdata, PLY_PROPERTY property, union ply_datum value);
-	bool (*startList)(void *userdata, PLY_PROPERTY property, uint32_t length);
-	bool (*endList)(void *userdata);
-	bool (*onListItem)(void *userdata, union ply_datum value);
-};
-
 enum ply_format {
 	PLY_FORMAT_UNKNOWN = 0,
 	PLY_FORMAT_ASCII,
@@ -59,6 +80,8 @@ enum ply_format {
 	PLY_FORMAT_BINARY_BIG_ENDIAN,
 };
 
+// Internal struct. Use the opaque-ish type PLY_PROPERTY and
+// the provided accessor functions instead of using this struct directly.
 struct ply_property {
 	struct ply_property  *next;
 	char                  name[PLY_MAX_NAME];
@@ -67,6 +90,8 @@ struct ply_property {
 	unsigned char         isList;
 };
 
+// Internal struct. Use the opaque-ish type PLY_PROPERTY and
+// the provided accessor functions instead of using this struct directly.
 struct ply_element {
 	struct ply_element   *next;
 	char                  name[PLY_MAX_NAME];
@@ -77,6 +102,7 @@ struct ply_element {
 };
 
 struct ply_parser {
+	// Information extracted from the header
 	enum ply_format       format;
 	struct ply_element   *elements;
 	struct ply_element  **elementsTail;
@@ -99,31 +125,37 @@ struct ply_parser {
 	unsigned long offset;
 };
 
+/* Turn a PLY return code into an error string (thread-safe).
+ * Obviously, this function does not handle user-defined error codes
+ * that may be returned by user-supplied callback functions.
+ */
+const char *ply_strerror(int status);
+
+/* The following is a series of fairly self-explanatory helper- and accessor-functions.
+ * You should prefer using these instead of peeking into the provided structs.
+ */
+
+PLY_PROPERTY ply_element_get_property(PLY_ELEMENT element, unsigned long propertyIndex);
+PLY_PROPERTY ply_element_get_property_by_name(PLY_ELEMENT element, const char *name);
+PLY_ELEMENT  ply_parser_get_element(struct ply_parser *ply, unsigned long elementIndex);
+PLY_ELEMENT  ply_parser_get_element_by_name(const struct ply_parser *ply, const char *name);
+
 static inline const char *
 ply_property_get_name(PLY_PROPERTY property) { return property->name; }
-
 static inline enum ply_type
 ply_property_is_list(PLY_PROPERTY property) { return property->isList; }
-
 static inline enum ply_type
 ply_property_get_index_type(PLY_PROPERTY property) { return property->indexType; }
-
 static inline enum ply_type
 ply_property_get_data_type(PLY_PROPERTY property) { return property->dataType; }
-
 static inline const char *
 ply_element_get_name(PLY_ELEMENT element) { return element->name; }
-
 static inline unsigned long
 ply_element_get_tuple_count(PLY_ELEMENT element) { return element->numTuples; }
-
 static inline unsigned long
 ply_parser_get_element_count(struct ply_parser *ply) { return ply->numElements; }
-
 static inline enum ply_format
 ply_parser_get_format(struct ply_parser *ply) { return ply->format; }
-
-const char          *ply_strerror(int status);
 
 void                 ply_parser_reset(struct ply_parser *ply);
 void                 ply_parser_set_input(struct ply_parser *ply, ply_read_callback readFunc, void *readData);
@@ -131,17 +163,31 @@ void                 ply_parser_set_work_area(struct ply_parser *ply, void *work
 
 int                  ply_parse_header(struct ply_parser *ply);
 
-PLY_PROPERTY         ply_element_get_property(PLY_ELEMENT element, unsigned long propertyIndex);
-PLY_PROPERTY         ply_element_get_property_by_name(PLY_ELEMENT element, const char *name);
-PLY_ELEMENT          ply_parser_get_element(struct ply_parser *ply, unsigned long elementIndex);
-PLY_ELEMENT          ply_parser_get_element_by_name(const struct ply_parser *ply, const char *name);
-
 union ply_datum      ply_cast(enum ply_type desiredType, enum ply_type dataType, union ply_datum datum);
 union ply_datum      ply_cast_normalized(enum ply_type desiredType, enum ply_type dataType, union ply_datum datum);
 
 int  ply_parser_start_streaming(struct ply_parser *ply);
 int  ply_stream_value(struct ply_parser *ply, union ply_datum *datum);
 int  ply_stream_list_item(struct ply_parser *ply, union ply_datum *datum);
+
+/* A set of user-specified callbacks that can be used as a SAX-like parser interface.
+ * Each callback can return a negative value to indicate an error to stop parsing early.
+ * It is OK for any these callbacks to be set to NULL if they are not needed.
+ */
+struct ply_handler {
+	int (*startElement)(void *userdata, PLY_ELEMENT element);
+	int (*endElement)(void *userdata);
+	int (*startTuple)(void *userdata, unsigned long tupleIndex);
+	int (*endTuple)(void *userdata);
+	int (*onDatum)(void *userdata, PLY_PROPERTY property, union ply_datum value);
+	int (*startList)(void *userdata, PLY_PROPERTY property, uint32_t length);
+	int (*endList)(void *userdata);
+	int (*onListItem)(void *userdata, union ply_datum value);
+};
+
+/* Alternative, SAX-style parsing function.
+ */
+int  ply_process_with_callbacks(struct ply_parser *ply, const struct ply_handler *handler, void *userdata);
 
 #endif
 
@@ -220,7 +266,7 @@ ply_parser_set_work_area(struct ply_parser *ply, void *workArea, size_t workSize
 static void *
 ply_reserve(struct ply_parser *ply, size_t size)
 {
-	if (ply->workBreak < PLY_MAX_LINE + size) return NULL;
+	if (ply->workBreak < PLY_MIN_BUFFER_CAPACITY + size) return NULL;
 	ply->workBreak -= size;
 	ply->workBreak &= ~(size_t)0xF;
 	void *pointer = ply->workArea + ply->workBreak;
@@ -387,7 +433,7 @@ ply_parse_header_line(struct ply_parser *ply, char *line)
 int
 ply_parse_header(struct ply_parser *ply)
 {
-	int r = ply->readFunc(ply->readData, ply->workArea, PLY_MAX_LINE);
+	int r = ply->readFunc(ply->readData, ply->workArea, PLY_MIN_BUFFER_CAPACITY);
 	if (r < 0) return PLY_ERR_READ;
 	ply->bufferFill = r;
 
@@ -405,7 +451,7 @@ ply_parse_header(struct ply_parser *ply)
 
 	for (;;) {
 		int r = ply->readFunc(ply->readData,
-			ply->workArea + ply->bufferFill, PLY_MAX_LINE - ply->bufferFill);
+			ply->workArea + ply->bufferFill, PLY_MIN_BUFFER_CAPACITY - ply->bufferFill);
 		if (r < 0) return PLY_ERR_READ;
 		ply->bufferFill += r;
 
@@ -762,6 +808,78 @@ ply_stream_list_item(struct ply_parser *ply, union ply_datum *datum)
 	ply->currentItem++;
 	// TODO don't run over the end of the list
 
+	return 0;
+}
+
+int
+ply_process_with_callbacks(struct ply_parser *ply, const struct ply_handler *handler, void *userdata)
+{
+	int r = ply_parser_start_streaming(ply);
+	if (r < 0) return r;
+
+	PLY_ELEMENT element = ply->elements;
+	while (element) {
+		if (handler->startElement) {
+			r = handler->startElement(userdata, element);
+			if (r < 0) return r;
+		}
+		
+		for (unsigned long t = 0; t < element->numTuples; t++) {
+			if (handler->startTuple) {
+				r = handler->startTuple(userdata, t);
+				if (r < 0) return r;
+			}
+
+			PLY_PROPERTY property = element->properties;
+			while (property) {
+				union ply_datum datum;
+				r = ply_stream_value(ply, &datum);
+				if (r < 0) return r;
+
+				if (property->isList) {
+					if (handler->startList) {
+						r = handler->startList(userdata, property, datum.u);
+						if (r < 0) return r;
+					}
+
+					union ply_datum item;
+					for (unsigned long i = 0; i < datum.u; i++) {
+						r = ply_stream_list_item(ply, &item);
+						if (r < 0) return r;
+
+						if (handler->onListItem) {
+							r = handler->onListItem(userdata, item);
+							if (r < 0) return r;
+						}
+					}
+					
+					if (handler->endList) {
+						r = handler->endList(userdata);
+						if (r < 0) return r;
+					}
+				} else {
+					if (handler->onDatum) {
+						r = handler->onDatum(userdata, property, datum);
+						if (r < 0) return r;
+					}
+				}
+
+				property = property->next;
+			}
+
+			if (handler->endTuple) {
+				r = handler->endTuple(userdata);
+				if (r < 0) return r;
+			}
+		}
+
+		if (handler->endElement) {
+			r = handler->endElement(userdata);
+			if (r < 0) return r;
+		}
+
+		element = element->next;
+	}
 	return 0;
 }
 
