@@ -160,17 +160,15 @@ main(int argc, const char **argv)
 		return 1;
 	}
 
-	struct ply_parser ply = { 0 };
-
-	ply_parser_reset(&ply);
+	struct ply_parser ply;
 
 	size_t workSize = 16 * 1024 * 1024;
 	void *workArea = calloc(1, workSize);
 
-	ply_parser_set_work_area(&ply, workArea, workSize);
+	ply_parser_set_memory(&ply, workArea, workSize);
 	ply_parser_set_input(&ply, file_read_callback, plyFile);
 
-	int s = ply_parse_header(&ply);
+	int s = ply_process_header(&ply);
 	if (s < 0) {
 		fclose(plyFile);
 		free(workArea);

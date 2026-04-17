@@ -37,6 +37,10 @@
 #define PLY_MIN_BUFFER_CAPACITY 1024
 #define PLY_MAX_NAME 32
 
+/* Unless otherwise noted, all functions that return an int either return a non-negative value on success,
+ * or a negative value to signal an error. The following are the error codes returned by the PLY parser itself.
+ * User-supplied callbacks may return other error codes.
+ */
 #define PLY_ERR_SPACE    -110
 #define PLY_ERR_LIMIT    -120
 #define PLY_ERR_READ     -130
@@ -70,15 +74,15 @@ union ply_datum {
 	double   d;
 };
 
-typedef const struct ply_property *PLY_PROPERTY;
-typedef const struct ply_element  *PLY_ELEMENT;
-
 enum ply_format {
 	PLY_FORMAT_UNKNOWN = 0,
 	PLY_FORMAT_ASCII,
 	PLY_FORMAT_BINARY_LITTLE_ENDIAN,
 	PLY_FORMAT_BINARY_BIG_ENDIAN,
 };
+
+typedef const struct ply_property *PLY_PROPERTY;
+typedef const struct ply_element  *PLY_ELEMENT;
 
 // Internal struct. Use the opaque-ish type PLY_PROPERTY and
 // the provided accessor functions instead of using this struct directly.
@@ -109,20 +113,25 @@ struct ply_parser {
 	struct ply_property **propertiesTail;
 	unsigned long         numElements;
 
-	char  *workArea;
-	size_t workSize;
-	size_t workBreak;
+	// Some work memory provided by the application.
+	// The lower half (below memoryBreak) is used as a read buffer,
+	// while the upper half is used as a heap to store element and
+	// property descriptions.
+	char  *memory;
+	size_t memorySize;
+	size_t memoryBreak;
 	size_t bufferFill;
 
+	// Input reading callback provided by the application.
 	ply_read_callback readFunc;
 	void             *readData;
 
-	// For the streaming API
+	// State of the streaming API
 	PLY_ELEMENT   currentElement;
 	unsigned long currentTuple;
 	PLY_PROPERTY  currentProperty;
 	unsigned long currentItem;
-	unsigned long offset;
+	unsigned long bufferOffset;
 };
 
 /* Turn a PLY return code into an error string (thread-safe).
@@ -139,7 +148,6 @@ PLY_PROPERTY ply_element_get_property(PLY_ELEMENT element, unsigned long propert
 PLY_PROPERTY ply_element_get_property_by_name(PLY_ELEMENT element, const char *name);
 PLY_ELEMENT  ply_parser_get_element(struct ply_parser *ply, unsigned long elementIndex);
 PLY_ELEMENT  ply_parser_get_element_by_name(const struct ply_parser *ply, const char *name);
-
 static inline const char *
 ply_property_get_name(PLY_PROPERTY property) { return property->name; }
 static inline enum ply_type
@@ -157,17 +165,61 @@ ply_parser_get_element_count(struct ply_parser *ply) { return ply->numElements; 
 static inline enum ply_format
 ply_parser_get_format(struct ply_parser *ply) { return ply->format; }
 
-void                 ply_parser_reset(struct ply_parser *ply);
-void                 ply_parser_set_input(struct ply_parser *ply, ply_read_callback readFunc, void *readData);
-void                 ply_parser_set_work_area(struct ply_parser *ply, void *workArea, size_t workSize);
+/* Set the read callback that the PLY parser will use to read more input.
+ * This function must be called before the parser can be used to do anything useful.
+ */
+void ply_parser_set_input(struct ply_parser *ply, ply_read_callback readFunc, void *readData);
 
-int                  ply_parse_header(struct ply_parser *ply);
+/* Set the memory area that the PLY parser will use for input buffering and to store
+ * some information about the file structure.
+ * This function must be called before the parser can be used to do anything useful.
+ */
+void ply_parser_set_memory(struct ply_parser *ply, void *memory, size_t memorySize);
 
-union ply_datum      ply_cast(enum ply_type desiredType, enum ply_type dataType, union ply_datum datum);
-union ply_datum      ply_cast_normalized(enum ply_type desiredType, enum ply_type dataType, union ply_datum datum);
+/* Reset the internal structures of the PLY parser.
+ * Then, process the header information of the PLY file.
+ * Must be called after a read callback and a memory pointer have been supplied.
+ * Can be called on a struct ply_parser that has already previously been used
+ * (but the input has to be reset by the user).
+ * After this function has successfully completed, you can inspect the file structure
+ * of elements and properties using the accessor functions.
+ */
+int  ply_process_header(struct ply_parser *ply);
 
-int  ply_parser_start_streaming(struct ply_parser *ply);
+/* Sometimes, PLY files provide the properties that you need in different types than the ones you expect.
+ * For these situations, you can use ply_cast() to convert a value from its current type to any other.
+ * This function does not check for any under- or overflows that may occur.
+ * When floating-point values are cast to integer values, they are rounded towards zero.
+ */
+union ply_datum ply_cast(enum ply_type desiredType, enum ply_type dataType, union ply_datum datum);
+
+/* This function is identical to ply_cast(), except that when casting to a floating-point type,
+ * signed integer types are normalized to a range between -1.0 and 1.0,
+ * and unsigned integer types are normalized to a range between 0.0 and 1.0.
+ */
+union ply_datum ply_cast_normalized(enum ply_type desiredType, enum ply_type dataType, union ply_datum datum);
+
+/* Preferred, stream-based parsing functionality.
+ * 
+ * ply_start_streaming() prepares the PLY parser for streaming.
+ * This function may only be called after ply_process_header().
+ * After this function has been called, it (or ply_process_with_callbacks()) should not be called
+ * on this struct ply_parser anymore, until ply_process_header() has been called again.
+ */
+int  ply_start_streaming(struct ply_parser *ply);
+
+/* Advance to the next value in the file, and store it in datum.
+ * If the property being read is a list, then the length of the list is stored in datum.
+ * Once you have read the length of the list,
+ * you need to call ply_stream_list_item() once for each item in the list,
+ * before reading the next value via ply_stream_value().
+ */
 int  ply_stream_value(struct ply_parser *ply, union ply_datum *datum);
+
+/* Advance to the next list item and read it.
+ * This function should only be called when the stream is inside of a list.
+ * It should only be called once for each item in the list.
+ */
 int  ply_stream_list_item(struct ply_parser *ply, union ply_datum *datum);
 
 /* A set of user-specified callbacks that can be used as a SAX-like parser interface.
@@ -186,6 +238,10 @@ struct ply_handler {
 };
 
 /* Alternative, SAX-style parsing function.
+ *
+ * This function may only be called after ply_process_header().
+ * After this function has been called, it (or ply_start_streaming()) should not be called
+ * on this struct ply_parser anymore, until ply_process_header() has been called again.
  */
 int  ply_process_with_callbacks(struct ply_parser *ply, const struct ply_handler *handler, void *userdata);
 
@@ -231,20 +287,6 @@ ply_strerror(int status)
 }
 
 void
-ply_parser_reset(struct ply_parser *ply)
-{
-	ply->format = PLY_FORMAT_UNKNOWN;
-	ply->elements = NULL;
-	ply->elementsTail = NULL;
-	ply->propertiesTail = NULL;
-	ply->numElements = 0;
-	ply->bufferFill = 0;
-
-	ply->workBreak  = ply->workSize;
-	ply->workBreak &= ~(size_t)0xF;
-}
-
-void
 ply_parser_set_input(struct ply_parser *ply, ply_read_callback readFunc, void *readData)
 {
 	ply->readFunc = readFunc;
@@ -254,22 +296,22 @@ ply_parser_set_input(struct ply_parser *ply, ply_read_callback readFunc, void *r
 }
 
 void
-ply_parser_set_work_area(struct ply_parser *ply, void *workArea, size_t workSize)
+ply_parser_set_memory(struct ply_parser *ply, void *memory, size_t memorySize)
 {
-	ply->workArea   = workArea;
-	ply->workSize   = workSize;
+	ply->memory       = memory;
+	ply->memorySize   = memorySize;
 
-	ply->workBreak  = ply->workSize;
-	ply->workBreak &= ~(size_t)0xF;
+	ply->memoryBreak  = ply->memorySize;
+	ply->memoryBreak &= ~(size_t)0xF;
 }
 
 static void *
 ply_reserve(struct ply_parser *ply, size_t size)
 {
-	if (ply->workBreak < PLY_MIN_BUFFER_CAPACITY + size) return NULL;
-	ply->workBreak -= size;
-	ply->workBreak &= ~(size_t)0xF;
-	void *pointer = ply->workArea + ply->workBreak;
+	if (ply->memoryBreak < PLY_MIN_BUFFER_CAPACITY + size) return NULL;
+	ply->memoryBreak -= size;
+	ply->memoryBreak &= ~(size_t)0xF;
+	void *pointer = ply->memory + ply->memoryBreak;
 	memset(pointer, 0, size);
 	return pointer;
 }
@@ -431,39 +473,45 @@ ply_parse_header_line(struct ply_parser *ply, char *line)
 }
 
 int
-ply_parse_header(struct ply_parser *ply)
+ply_process_header(struct ply_parser *ply)
 {
-	int r = ply->readFunc(ply->readData, ply->workArea, PLY_MIN_BUFFER_CAPACITY);
+	// Reset our data structures
+	ply->format         = PLY_FORMAT_UNKNOWN;
+	ply->elements       = NULL;
+	ply->elementsTail   = &ply->elements;
+	ply->propertiesTail = NULL;
+	ply->numElements    = 0;
+	ply->bufferFill     = 0;
+
+	// Release any memory that may have been sub-allocated from the memory area
+	ply->memoryBreak  = ply->memorySize;
+	ply->memoryBreak &= ~(size_t)0xF;
+
+	int r = ply->readFunc(ply->readData, ply->memory, PLY_MIN_BUFFER_CAPACITY);
 	if (r < 0) return PLY_ERR_READ;
 	ply->bufferFill = r;
 
-	if (ply->bufferFill < 4 || !!memcmp(ply->workArea, "ply\n", 4)) {
+	if (ply->bufferFill < 4 || !!memcmp(ply->memory, "ply\n", 4)) {
 		return PLY_ERR_SYNTAX;
 	}
 	ply->bufferFill -= 4;
-	memmove(ply->workArea, ply->workArea + 4, ply->bufferFill);
-
-	ply->format = PLY_FORMAT_UNKNOWN;
-	ply->elements = NULL;
-	ply->elementsTail = &ply->elements;
-	ply->propertiesTail = NULL;
-	ply->numElements = 0;
+	memmove(ply->memory, ply->memory + 4, ply->bufferFill);
 
 	for (;;) {
 		int r = ply->readFunc(ply->readData,
-			ply->workArea + ply->bufferFill, PLY_MIN_BUFFER_CAPACITY - ply->bufferFill);
+			ply->memory + ply->bufferFill, PLY_MIN_BUFFER_CAPACITY - ply->bufferFill);
 		if (r < 0) return PLY_ERR_READ;
 		ply->bufferFill += r;
 
-		char *nl = strchr(ply->workArea, '\n');
+		char *nl = strchr(ply->memory, '\n');
 		if (!nl) return PLY_ERR_SYNTAX;
 		*nl = 0;
 
-		int s = ply_parse_header_line(ply, ply->workArea);
+		int s = ply_parse_header_line(ply, ply->memory);
 		if (s < 0) return s;
 
-		ply->bufferFill -= nl + 1 - ply->workArea;
-		memmove(ply->workArea, nl + 1, ply->bufferFill);
+		ply->bufferFill -= nl + 1 - ply->memory;
+		memmove(ply->memory, nl + 1, ply->bufferFill);
 
 		if (s == 0) break;
 	}
@@ -702,13 +750,13 @@ ply_cast_normalized(enum ply_type desiredType, enum ply_type dataType, union ply
 // FIXME support #elems = 0 or #props = 0 or #tuples = 0
 
 int
-ply_parser_start_streaming(struct ply_parser *ply)
+ply_start_streaming(struct ply_parser *ply)
 {
 	ply->currentElement  = NULL;
 	ply->currentTuple    = ULONG_MAX;
 	ply->currentProperty = NULL;
 	ply->currentItem     = 0;
-	ply->offset          = 0;
+	ply->bufferOffset    = 0;
 	return 0;
 }
 
@@ -721,7 +769,7 @@ ply_advance(struct ply_parser *ply)
 		ply->currentProperty = ply->currentElement->properties;
 		ply->currentItem     = 0;
 
-		int r = ply->readFunc(ply->readData, ply->workArea + ply->bufferFill, ply->workBreak - ply->bufferFill);
+		int r = ply->readFunc(ply->readData, ply->memory + ply->bufferFill, ply->memoryBreak - ply->bufferFill);
 		if (r < 0) return PLY_ERR_READ;
 		ply->bufferFill += r;
 
@@ -744,17 +792,17 @@ ply_advance(struct ply_parser *ply)
 		ply->currentProperty = ply->currentElement->properties;
 
 		if (ply->format == PLY_FORMAT_ASCII) {
-			if (ply->workArea[ply->offset] != '\n') {
+			if (ply->memory[ply->bufferOffset] != '\n') {
 				return PLY_ERR_SYNTAX;
 			}
-			ply->offset++;
+			ply->bufferOffset++;
 		}
 		
-		ply->bufferFill -= ply->offset;
-		memmove(ply->workArea, ply->workArea + ply->offset, ply->bufferFill);
-		ply->offset = 0;
+		ply->bufferFill -= ply->bufferOffset;
+		memmove(ply->memory, ply->memory + ply->bufferOffset, ply->bufferFill);
+		ply->bufferOffset = 0;
 
-		int r = ply->readFunc(ply->readData, ply->workArea + ply->bufferFill, ply->workBreak - ply->bufferFill);
+		int r = ply->readFunc(ply->readData, ply->memory + ply->bufferFill, ply->memoryBreak - ply->bufferFill);
 		if (r < 0) return PLY_ERR_READ;
 		ply->bufferFill += r;
 	}
@@ -769,10 +817,10 @@ ply_stream_value(struct ply_parser *ply, union ply_datum *datum)
 
 	if (ply->currentProperty->isList) {
 		union ply_datum indexDatum;
-		r = ply_read_datum(ply->format, ply->workArea + ply->offset,
+		r = ply_read_datum(ply->format, ply->memory + ply->bufferOffset,
 			ply->currentProperty->indexType, &indexDatum);
 		if (r < 0) return r;
-		ply->offset += r;
+		ply->bufferOffset += r;
 
 		unsigned listLength;
 		switch (ply->currentProperty->indexType) {
@@ -786,10 +834,10 @@ ply_stream_value(struct ply_parser *ply, union ply_datum *datum)
 		datum->u = listLength;
 		ply->currentItem = 0;
 	} else {
-		r = ply_read_datum(ply->format, ply->workArea + ply->offset,
+		r = ply_read_datum(ply->format, ply->memory + ply->bufferOffset,
 			ply->currentProperty->dataType, datum);
 		if (r < 0) return r;
-		ply->offset += r;
+		ply->bufferOffset += r;
 	}
 
 	return 0;
@@ -799,10 +847,10 @@ int
 ply_stream_list_item(struct ply_parser *ply, union ply_datum *datum)
 {
 	int r;
-	r = ply_read_datum(ply->format, ply->workArea + ply->offset,
+	r = ply_read_datum(ply->format, ply->memory + ply->bufferOffset,
 		ply->currentProperty->dataType, datum);
 	if (r < 0) return r;
-	ply->offset += r;
+	ply->bufferOffset += r;
 
 	// Advance to the next list item
 	ply->currentItem++;
@@ -814,7 +862,7 @@ ply_stream_list_item(struct ply_parser *ply, union ply_datum *datum)
 int
 ply_process_with_callbacks(struct ply_parser *ply, const struct ply_handler *handler, void *userdata)
 {
-	int r = ply_parser_start_streaming(ply);
+	int r = ply_start_streaming(ply);
 	if (r < 0) return r;
 
 	PLY_ELEMENT element = ply->elements;
