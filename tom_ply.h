@@ -667,6 +667,55 @@ ply_read_datum_le(const unsigned char *raw, enum ply_type type, union ply_datum 
 }
 
 static int
+ply_read_datum_be(const unsigned char *raw, enum ply_type type, union ply_datum *datum)
+{
+	uint64_t q;
+	switch (type) {
+	case PLY_TYPE_INT8:
+		datum->i  = (int32_t)raw[0];
+		return 1;
+
+	case PLY_TYPE_UINT8:
+		datum->u  = (uint32_t)raw[0];
+		return 1;
+
+	case PLY_TYPE_INT16:
+		datum->i  = (int32_t)raw[0] << 8;
+		datum->i |= (int32_t)raw[1] << 0;
+		return 2;
+
+	case PLY_TYPE_UINT16:
+		datum->u  = (uint32_t)raw[0] << 8;
+		datum->u |= (uint32_t)raw[1] << 0;
+		return 2;
+
+	case PLY_TYPE_INT32:
+	case PLY_TYPE_UINT32:
+	case PLY_TYPE_FLOAT32:
+		datum->u  = (uint32_t)raw[0] << 24;
+		datum->u |= (uint32_t)raw[1] << 16;
+		datum->u |= (uint32_t)raw[2] <<  8;
+		datum->u |= (uint32_t)raw[3] <<  0;
+		return 4;
+	
+	case PLY_TYPE_FLOAT64:
+		q  = (uint64_t)raw[0] << 56;
+		q |= (uint64_t)raw[1] << 48;
+		q |= (uint64_t)raw[2] << 40;
+		q |= (uint64_t)raw[3] << 32;
+		q |= (uint64_t)raw[4] << 24;
+		q |= (uint64_t)raw[5] << 16;
+		q |= (uint64_t)raw[6] <<  8;
+		q |= (uint64_t)raw[7] <<  0;
+		datum->d = (double)q;
+		return 8;
+	
+	default:
+		return PLY_ERR_INTERNAL;
+	}
+}
+
+static int
 ply_read_datum(enum ply_format format, const char *raw, enum ply_type type, union ply_datum *datum)
 {
 	switch (format) {
@@ -675,6 +724,9 @@ ply_read_datum(enum ply_format format, const char *raw, enum ply_type type, unio
 	
 	case PLY_FORMAT_BINARY_LITTLE_ENDIAN:
 		return ply_read_datum_le((const unsigned char *)raw, type, datum);
+	
+	case PLY_FORMAT_BINARY_BIG_ENDIAN:
+		return ply_read_datum_be((const unsigned char *)raw, type, datum);
 	
 	default:
 		return PLY_ERR_INTERNAL;
