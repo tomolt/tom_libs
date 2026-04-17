@@ -891,11 +891,11 @@ ply_cast_normalized(enum ply_type desiredType, enum ply_type dataType, union ply
 int
 ply_parser_start_streaming(struct ply_parser *ply)
 {
+#if 0
 	ply->currentElement  = ply->elements;
 	ply->currentTuple    = 0;
 	ply->currentProperty = ply->elements->properties;
 	ply->currentItem     = 0;
-	ply->tokenState      = ply->line;
 
 	int r = ply->readFunc(ply->readData, ply->line + ply->lineLength, PLY_MAX_LINE - ply->lineLength);
 	if (r < 0) return PLY_ERR_READ;
@@ -905,6 +905,12 @@ ply_parser_start_streaming(struct ply_parser *ply)
 	if (!ply->nextLine) return PLY_ERR_SYNTAX;
 	*ply->nextLine = 0;
 	ply->tokenState = ply->line;
+#else
+	ply->currentElement  = NULL;
+	ply->currentTuple    = ULONG_MAX;
+	ply->currentProperty = NULL;
+	ply->currentItem     = 0;
+#endif
 
 	return 0;
 }
@@ -960,6 +966,24 @@ ply_stream_list_item(struct ply_parser *ply, union ply_datum *datum)
 int
 ply_advance(struct ply_parser *ply)
 {
+	if (!ply->currentProperty) {
+		ply->currentElement  = ply->elements;
+		ply->currentTuple    = 0;
+		ply->currentProperty = ply->currentElement->properties;
+		ply->currentItem     = 0;
+
+		int r = ply->readFunc(ply->readData, ply->line + ply->lineLength, PLY_MAX_LINE - ply->lineLength);
+		if (r < 0) return PLY_ERR_READ;
+		ply->lineLength += (unsigned)r;
+
+		ply->nextLine = strchr(ply->line, '\n');
+		if (!ply->nextLine) return PLY_ERR_SYNTAX;
+		*ply->nextLine = 0;
+		ply->tokenState = ply->line;
+
+		return 0;
+	}
+
 	// Advance to the next (element, tuple, property)
 	ply->currentProperty = ply->currentProperty->next;
 	if (!ply->currentProperty) {
@@ -969,7 +993,7 @@ ply_advance(struct ply_parser *ply)
 		if (ply->currentTuple >= ply->currentElement->numTuples) {
 			ply->currentElement = ply->currentElement->next;
 			if (!ply->currentElement) {
-				return -1; // TODO
+				ply->currentElement = ply->elements;
 			}
 			ply->currentTuple = 0;
 		}

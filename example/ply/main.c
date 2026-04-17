@@ -226,6 +226,7 @@ main(int argc, const char **argv)
 			PLY_PROPERTY property = element->properties;
 			while (property) {
 				union ply_datum datum;
+				s = ply_advance(&ply);
 				s = ply_stream_value(&ply, &datum);
 				if (ply_property_is_list(property)) {
 					my_handler.startList(NULL, property, datum.u);
@@ -238,7 +239,6 @@ main(int argc, const char **argv)
 				} else {
 					my_handler.onDatum(NULL, property, datum);
 				}
-				ply_advance(&ply);
 				property = property->next;
 			}
 			my_handler.endTuple(NULL);
