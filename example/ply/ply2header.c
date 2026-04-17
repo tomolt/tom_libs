@@ -15,14 +15,60 @@ file_read_callback(void *file, void *buffer, unsigned max)
 	return (int)got;
 }
 
-static enum ply_type itemType;
+const char *
+to_c_type(enum ply_type type)
+{
+	switch (type) {
+	case PLY_TYPE_INT8:    return "int8_t";
+	case PLY_TYPE_INT16:   return "int16_t";
+	case PLY_TYPE_INT32:   return "int32_t";
+	case PLY_TYPE_UINT8:   return "uint8_t";
+	case PLY_TYPE_UINT16:  return "uint16_t";
+	case PLY_TYPE_UINT32:  return "uint32_t";
+	case PLY_TYPE_FLOAT32: return "float";
+	case PLY_TYPE_FLOAT64: return "double";
+	default:               return "";
+	}
+}
+
+void
+print_c_value(enum ply_type type, union ply_scalar value)
+{
+	switch (type) {
+	case PLY_TYPE_INT8:
+	case PLY_TYPE_INT16:
+	case PLY_TYPE_INT32:
+		printf("%"PRId32", ", value.i);
+		break;
+
+	case PLY_TYPE_UINT8:
+	case PLY_TYPE_UINT16:
+	case PLY_TYPE_UINT32:
+		printf("%"PRIu32", ", value.u);
+		break;
+
+	case PLY_TYPE_FLOAT32:
+		printf("%f, ", value.f);
+		break;
+
+	case PLY_TYPE_FLOAT64:
+		printf("%lf, ", value.d);
+		break;
+	}
+}
+
+struct handler_data {
+	const char *basename;
+	enum ply_type itemType;
+};
 
 int
 start_element(void *userdata, PLY_ELEMENT element)
 {
-	(void)userdata;
+	struct handler_data *data = userdata;
 	const char *name = ply_element_get_name(element);
-	printf("static const struct e_%s e_%s[] = {\n", name, name);
+	printf("static const struct %s_%s %s_%s[] = {\n",
+		data->basename, name, data->basename, name);
 	return 0;
 }
 
@@ -55,47 +101,16 @@ int
 on_scalar_value(void *userdata, PLY_PROPERTY property, union ply_scalar value)
 {
 	(void)userdata;
-	switch (ply_property_get_scalar_type(property)) {
-	case PLY_TYPE_INT8:
-	case PLY_TYPE_INT16:
-	case PLY_TYPE_INT32:
-		printf("%"PRId32", ", value.i);
-		break;
-
-	case PLY_TYPE_UINT8:
-	case PLY_TYPE_UINT16:
-	case PLY_TYPE_UINT32:
-		printf("%"PRIu32", ", value.u);
-		break;
-
-	case PLY_TYPE_FLOAT32:
-		printf("%f, ", value.f);
-		break;
-
-	case PLY_TYPE_FLOAT64:
-		printf("%lf, ", value.d);
-		break;
-	}
+	print_c_value(ply_property_get_scalar_type(property), value);
 	return 0;
 }
 
 int
 start_list(void *userdata, PLY_PROPERTY property, uint32_t length)
 {
-	(void)userdata;
-	itemType = ply_property_get_scalar_type(property);
-	const char *typeName = "";
-	switch (itemType) {
-		case PLY_TYPE_INT8:    typeName = "int8_t";   break;
-		case PLY_TYPE_INT16:   typeName = "int16_t";  break;
-		case PLY_TYPE_INT32:   typeName = "int32_t";  break;
-		case PLY_TYPE_UINT8:   typeName = "uint8_t";  break;
-		case PLY_TYPE_UINT16:  typeName = "uint16_t"; break;
-		case PLY_TYPE_UINT32:  typeName = "uint32_t"; break;
-		case PLY_TYPE_FLOAT32: typeName = "float";    break;
-		case PLY_TYPE_FLOAT64: typeName = "double";   break;
-	}
-	printf("%u, (%s[]){ ", length, typeName);
+	struct handler_data *data = userdata;
+	data->itemType = ply_property_get_scalar_type(property);
+	printf("%u, (%s[]){ ", length, to_c_type(data->itemType));
 	return 0;
 }
 
@@ -110,28 +125,8 @@ end_list(void *userdata)
 int
 on_list_item(void *userdata, union ply_scalar value)
 {
-	(void)userdata;
-	switch (itemType) {
-	case PLY_TYPE_INT8:
-	case PLY_TYPE_INT16:
-	case PLY_TYPE_INT32:
-		printf("%"PRId32", ", value.i);
-		break;
-
-	case PLY_TYPE_UINT8:
-	case PLY_TYPE_UINT16:
-	case PLY_TYPE_UINT32:
-		printf("%"PRIu32", ", value.u);
-		break;
-
-	case PLY_TYPE_FLOAT32:
-		printf("%f, ", value.f);
-		break;
-
-	case PLY_TYPE_FLOAT64:
-		printf("%lf, ", value.d);
-		break;
-	}
+	struct handler_data *data = userdata;
+	print_c_value(data->itemType, value);
 	return 0;
 }
 
@@ -160,6 +155,18 @@ main(int argc, const char **argv)
 		return 1;
 	}
 
+	// Extract the base name of the file, in a hacky way ...
+	char basename[100];
+	strncpy(basename, argv[1], sizeof(basename) - 1);
+	basename[sizeof(basename) - 1] = 0;
+	char *split;
+	while ((split = strchr(basename, '/'))) {
+		memmove(basename, split + 1, sizeof(basename) - (split + 1 - basename));
+	}
+	if ((split = strchr(basename, '.'))) {
+		*split = 0;
+	}
+
 	struct ply_parser ply;
 
 	size_t workSize = 16 * 1024 * 1024;
@@ -177,35 +184,26 @@ main(int argc, const char **argv)
 	}
 
 	printf(
-		"#ifndef PLY_CONTENTS_H\n"
-		"#define PLY_CONTENTS_H\n\n"
-		"#include <stdint.h>\n\n");
+		"#ifndef %s_PLY_H\n"
+		"#define %s_PLY_H\n\n"
+		"#include <stdint.h>\n\n",
+		basename, basename);
 
 	unsigned long numElements = ply_parser_get_element_count(&ply);
 	for (unsigned long e = 0; e < numElements; e++) {
 		PLY_ELEMENT element = ply_parser_get_element(&ply, e);
-		printf("struct e_%s {\n", ply_element_get_name(element));
+		printf("struct %s_%s {\n", basename, ply_element_get_name(element));
 
-		// TODO
-		PLY_PROPERTY property = element->properties;
-		while (property) {
-			const char *typeName = "";
-			switch (ply_property_get_scalar_type(property)) {
-			case PLY_TYPE_INT8:    typeName = "int8_t";   break;
-			case PLY_TYPE_INT16:   typeName = "int16_t";  break;
-			case PLY_TYPE_INT32:   typeName = "int32_t";  break;
-			case PLY_TYPE_UINT8:   typeName = "uint8_t";  break;
-			case PLY_TYPE_UINT16:  typeName = "uint16_t"; break;
-			case PLY_TYPE_UINT32:  typeName = "uint32_t"; break;
-			case PLY_TYPE_FLOAT32: typeName = "float";    break;
-			case PLY_TYPE_FLOAT64: typeName = "double";   break;
-			}
+		for (unsigned long p = 0; p < ply_element_get_property_count(element); p++) {
+			PLY_PROPERTY property = ply_element_get_property(element, p);
+			const char *scalarType = to_c_type(ply_property_get_scalar_type(property));
 			const char *name = ply_property_get_name(property);
 			if (ply_property_is_list(property)) {
-				printf("\t%s n_%s;\n", "int", name); // TODO
-				printf("\t%s *p_%s;\n", typeName, name);
+				const char *lengthType = to_c_type(ply_property_get_length_type(property));
+				printf("\t%s n_%s;\n", lengthType, name);
+				printf("\t%s *p_%s;\n", scalarType, name);
 			} else {
-				printf("\t%s p_%s;\n", typeName, name);
+				printf("\t%s p_%s;\n", scalarType, name);
 			}
 			property = property->next;
 		}
@@ -213,7 +211,9 @@ main(int argc, const char **argv)
 		printf("};\n\n");
 	}
 
-	s = ply_process_with_callbacks(&ply, &my_handler, NULL);
+	struct handler_data data;
+	data.basename = basename;
+	s = ply_process_with_callbacks(&ply, &my_handler, &data);
 	if (s < 0) {
 		fclose(plyFile);
 		free(workArea);

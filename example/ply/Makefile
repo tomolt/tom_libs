@@ -6,19 +6,17 @@ CFLAGS = -std=c99 -Wall -Wextra -pedantic -g
 CPPFLAGS = -I../.. -D_POSIX_C_SOURCE=200809L
 LDFLAGS = -g
 
-OBJS = main.o
-
 .POSIX:
 
 .PHONY: all clean
 
-all: ply2c
+all: ply2header
 
 clean:
-	$(RM) ply2c $(OBJS)
+	$(RM) ply2header ply2header.o
 
-ply2c: ${OBJS}
-	$(LD) -o $@ $(LDFLAGS) $(OBJS)
+ply2header: ply2header.o
+	$(LD) -o $@ $(LDFLAGS) ply2header.o
 
 .c.o:
 	$(CC) -c -o $@ $(CFLAGS) $(@:.o=.c) $(CPPFLAGS)
