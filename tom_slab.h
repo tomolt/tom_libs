@@ -148,6 +148,7 @@ struct slab_footer {
 };
 
 struct slab {
+	SLAB_mutex coarse_lock;
 	struct slab_list empty;
 	struct slab_list partial;
 	struct slab_list full;
@@ -242,6 +243,7 @@ slab_release(struct slab *slab, struct slab_list *list, struct slab_list_node *n
 static void
 slab_release_list(struct slab *slab, struct slab_list *list)
 {
+	// TODO for in list
 	struct slab_list_node *node = list->head.next;
 	while (node != &list->head) {
 		struct slab_list_node *next = node->next;
@@ -266,6 +268,8 @@ slab_create(int elemsz, void (*ctor)(void *, int), void (*dtor)(void *, int))
 	}
 	memset(slab, 0, sizeof *slab);
 
+	SLAB_mutex_init(slab->coarse_lock);
+
 	slab_list_create(&slab->empty);
 	slab_list_create(&slab->partial);
 	slab_list_create(&slab->full);
@@ -284,6 +288,7 @@ slab_destroy(struct slab *slab)
 	slab_release_list(slab, &slab->empty);
 	slab_release_list(slab, &slab->partial);
 	slab_release_list(slab, &slab->full);
+	SLAB_mutex_destroy(slab->coarse_lock);
 	SLAB_free(slab);
 }
 
@@ -302,13 +307,17 @@ slab_reset_list(struct slab *slab, struct slab_list *list)
 void
 slab_reset(struct slab *slab)
 {
+	SLAB_mutex_lock(slab->coarse_lock);
 	slab_reset_list(slab, &slab->partial);
 	slab_reset_list(slab, &slab->full);
+	SLAB_mutex_unlock(slab->coarse_lock);
 }
 
 void *
 slab_alloc(struct slab *slab)
 {
+	SLAB_mutex_lock(slab->coarse_lock);
+
 	if (slab_list_is_empty(&slab->partial)) {
 		if (slab_list_is_empty(&slab->empty)) {
 			slab_grow(slab);
@@ -337,6 +346,8 @@ slab_alloc(struct slab *slab)
 		slab_list_push_back(&slab->full, &footer->node);
 	}
 
+	SLAB_mutex_unlock(slab->coarse_lock);
+
 	uintptr_t base = SLAB_GET_BASE(node);
 	return (void *) (base + idx * slab->elemsz);
 }
@@ -352,6 +363,8 @@ slab_trim(struct slab *slab)
 void
 slab_free(struct slab *slab, void *ptr)
 {
+	SLAB_mutex_lock(slab->coarse_lock);
+
 	uintptr_t base = SLAB_GET_BASE(ptr);
 	struct slab_footer *footer = SLAB_GET_FOOTER(base);
 	int idx = ((uintptr_t) ptr - base) / slab->elemsz;
@@ -371,6 +384,8 @@ slab_free(struct slab *slab, void *ptr)
 	}
 	
 	slab_trim(slab);
+
+	SLAB_mutex_unlock(slab->coarse_lock);
 }
 
 static void
@@ -392,8 +407,12 @@ void
 slab_iterate(struct slab *slab,
 	void (*func)(void *, void *), void *userdata)
 {
+	SLAB_mutex_lock(slab->coarse_lock);
+
 	slab_iterate_list(&slab->full, slab->elemsz, slab->maxelems, func, userdata);
 	slab_iterate_list(&slab->partial, slab->elemsz, slab->maxelems, func, userdata);
+
+	SLAB_mutex_unlock(slab->coarse_lock);
 }
 
 #endif
