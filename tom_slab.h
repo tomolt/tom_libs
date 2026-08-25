@@ -44,8 +44,6 @@ void slab_reset(struct slab *slab);
 void *slab_alloc(struct slab *slab);
 void  slab_free (struct slab *slab, void *ptr);
 
-void slab_iterate(struct slab *slab, void (*func)(void *, void *), void *userdata);
-
 #endif
 
 #ifdef SLAB_IMPLEMENTATION
@@ -243,7 +241,6 @@ slab_release(struct slab *slab, struct slab_list *list, struct slab_list_node *n
 static void
 slab_release_list(struct slab *slab, struct slab_list *list)
 {
-	// TODO for in list
 	struct slab_list_node *node = list->head.next;
 	while (node != &list->head) {
 		struct slab_list_node *next = node->next;
@@ -384,33 +381,6 @@ slab_free(struct slab *slab, void *ptr)
 	}
 	
 	slab_trim(slab);
-
-	SLAB_mutex_unlock(slab->coarse_lock);
-}
-
-static void
-slab_iterate_list(struct slab_list *list, int elemsz, int maxelems,
-	void (*func)(void *, void *), void *userdata)
-{
-	SLAB_FOR_IN_LIST(footer, *list, struct slab_footer, node) {
-		uintptr_t base = SLAB_GET_BASE(footer);
-		for (int idx = 0; idx < maxelems; idx++) {
-			if (!SLAB_GET_BIT(footer->avail, idx)) {
-				void *ptr = (void *) (base + idx * elemsz);
-				func(userdata, ptr);
-			}
-		}
-	}
-}
-
-void
-slab_iterate(struct slab *slab,
-	void (*func)(void *, void *), void *userdata)
-{
-	SLAB_mutex_lock(slab->coarse_lock);
-
-	slab_iterate_list(&slab->full, slab->elemsz, slab->maxelems, func, userdata);
-	slab_iterate_list(&slab->partial, slab->elemsz, slab->maxelems, func, userdata);
 
 	SLAB_mutex_unlock(slab->coarse_lock);
 }
