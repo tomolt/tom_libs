@@ -1,5 +1,5 @@
 /* tom_slab: SLAB allocator
- * version: 
+ * version: 1.0
  *
  * Copyright (C) 2022-2026 Thomas Oltmann
  * 
@@ -30,23 +30,60 @@
  * SLAB_mutex_destroy
  */
 
-// TODO multiple arenas, one per thread?
-
 #ifndef _TOM_SLAB_H_
 #define _TOM_SLAB_H_
 
-struct slab;
+typedef struct slab SLAB;
 
-struct slab *slab_create(int elemsz, void (*ctor)(void *, int), void (*dtor)(void *, int));
-void slab_destroy(struct slab *slab);
-void slab_reset(struct slab *slab);
+/**
+ * Create a new SLAB allocator.
+ *
+ * \param elemsz   The size of one allocated element.
+ *                 Can be any non-negative value (including zero).
+ * \param ctor     A constructor that is executed on each element before it is allocated.
+ *                 Can be set to NULL.
+ * \param dtor     A destructor that is executed on each element after it has been freed.
+ *                 Can be set to NULL.
+ * \return         An opaque pointer to the SLAB allocator object.
+ *                 If an error occurs, NULL is returned.
+ */
+SLAB *slab_create(int elemsz, void (*ctor)(void *, int), void (*dtor)(void *, int));
 
-void *slab_alloc(struct slab *slab);
-void  slab_free (struct slab *slab, void *ptr);
+/**
+ * Destroy a SLAB allocator.
+ * All of the elements that were still allocated in the allocator will be free'd.
+ * Accepts NULL pointers.
+ */
+void slab_destroy(SLAB *slab);
+
+/**
+ * Free all elements in a SLAB allocator, without destroying the SLAB allocator itself.
+ * Thread safe.
+ * Accepts NULL pointers.
+ */
+void slab_reset(SLAB *slab);
+
+/**
+ * Allocate a new element from the SLAB allocator.
+ * Thread safe.
+ *
+ * \return A pointer to the new element.
+ *         If an error occurs, or if slab is NULL, then NULL is returned.
+ */
+void *slab_alloc(SLAB *slab);
+
+/**
+ * Free an element from the SLAB allocator.
+ * Thread safe.
+ * Accepts NULL pointers.
+ */
+void  slab_free(SLAB *slab, void *ptr);
 
 #endif
 
 #ifdef SLAB_IMPLEMENTATION
+
+// TODO multiple arenas, one per thread?
 
 #include <stddef.h> /* for offsetof */
 #include <stdbool.h>
@@ -212,10 +249,12 @@ slab_noop_ctor_or_dtor(void *ptr, int elemsz)
 	(void)elemsz;
 }
 
-static void
-slab_grow(struct slab *slab)
+static bool
+slab_grow(SLAB *slab)
 {
-	uintptr_t base = (uintptr_t) SLAB_alloc_page(SLAB_PAGE_SIZE);
+	void *ptr = SLAB_alloc_page(SLAB_PAGE_SIZE);
+	if (!ptr) return false;
+	uintptr_t base = (uintptr_t) ptr;
 	struct slab_footer *footer = SLAB_GET_FOOTER(base);
 	memset(footer, 0, sizeof *footer);
 	for (int i = 0; i < slab->maxelems; i++) {
@@ -224,10 +263,11 @@ slab_grow(struct slab *slab)
 		SLAB_SET_BIT(footer->avail, i);
 	}
 	slab_list_push_back(&slab->empty, &footer->node);
+	return true;
 }
 
 static void
-slab_release(struct slab *slab, struct slab_list *list, struct slab_list_node *node)
+slab_release(SLAB *slab, struct slab_list *list, struct slab_list_node *node)
 {
 	slab_list_remove(list, node);
 	uintptr_t base = SLAB_GET_BASE(node);
@@ -239,7 +279,7 @@ slab_release(struct slab *slab, struct slab_list *list, struct slab_list_node *n
 }
 
 static void
-slab_release_list(struct slab *slab, struct slab_list *list)
+slab_release_list(SLAB *slab, struct slab_list *list)
 {
 	struct slab_list_node *node = list->head.next;
 	while (node != &list->head) {
@@ -249,9 +289,10 @@ slab_release_list(struct slab *slab, struct slab_list *list)
 	}
 }
 
-struct slab *
+SLAB *
 slab_create(int elemsz, void (*ctor)(void *, int), void (*dtor)(void *, int))
 {
+	elemsz = SLAB_DIVIDE_ROUND_UP(elemsz, 16) * 16;
 	if (elemsz < SLAB_MIN_ALLOC) {
 		elemsz = SLAB_MIN_ALLOC;
 	}
@@ -259,7 +300,7 @@ slab_create(int elemsz, void (*ctor)(void *, int), void (*dtor)(void *, int))
 		return NULL;
 	}
 
-	struct slab *slab = SLAB_malloc(sizeof *slab);
+	SLAB *slab = SLAB_malloc(sizeof *slab);
 	if (!slab) {
 		return NULL;
 	}
@@ -280,8 +321,10 @@ slab_create(int elemsz, void (*ctor)(void *, int), void (*dtor)(void *, int))
 }
 
 void
-slab_destroy(struct slab *slab)
+slab_destroy(SLAB *slab)
 {
+	if (!slab) return;
+
 	slab_release_list(slab, &slab->empty);
 	slab_release_list(slab, &slab->partial);
 	slab_release_list(slab, &slab->full);
@@ -290,7 +333,7 @@ slab_destroy(struct slab *slab)
 }
 
 static void
-slab_reset_list(struct slab *slab, struct slab_list *list)
+slab_reset_list(SLAB *slab, struct slab_list *list)
 {
 	SLAB_FOR_IN_LIST(footer, *list, struct slab_footer, node) {
 		for (int idx = 0; idx < slab->maxelems; idx++) {
@@ -302,8 +345,10 @@ slab_reset_list(struct slab *slab, struct slab_list *list)
 }
 
 void
-slab_reset(struct slab *slab)
+slab_reset(SLAB *slab)
 {
+	if (!slab) return;
+
 	SLAB_mutex_lock(slab->coarse_lock);
 	slab_reset_list(slab, &slab->partial);
 	slab_reset_list(slab, &slab->full);
@@ -311,13 +356,19 @@ slab_reset(struct slab *slab)
 }
 
 void *
-slab_alloc(struct slab *slab)
+slab_alloc(SLAB *slab)
 {
+	if (!slab) return NULL;
+
 	SLAB_mutex_lock(slab->coarse_lock);
 
 	if (slab_list_is_empty(&slab->partial)) {
 		if (slab_list_is_empty(&slab->empty)) {
-			slab_grow(slab);
+			bool s = slab_grow(slab);
+			if (!s) {
+				SLAB_mutex_unlock(slab->coarse_lock);
+				return NULL;
+			}
 		}
 		// empty -> partial
 		slab_list_push_back(&slab->partial, slab_list_pop_front(&slab->empty));
@@ -350,7 +401,7 @@ slab_alloc(struct slab *slab)
 }
 
 static void
-slab_trim(struct slab *slab)
+slab_trim(SLAB *slab)
 {
 	while (slab->empty.count > slab->full.count + slab->partial.count) {
 		slab_release(slab, &slab->empty, slab->empty.head.next);
@@ -358,8 +409,11 @@ slab_trim(struct slab *slab)
 }
 
 void
-slab_free(struct slab *slab, void *ptr)
+slab_free(SLAB *slab, void *ptr)
 {
+	if (!slab) return;
+	if (!ptr) return;
+
 	SLAB_mutex_lock(slab->coarse_lock);
 
 	uintptr_t base = SLAB_GET_BASE(ptr);
