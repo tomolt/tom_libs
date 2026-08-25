@@ -38,15 +38,13 @@
 struct slab;
 
 struct slab *slab_create(int elemsz, void (*ctor)(void *, int), void (*dtor)(void *, int));
-void slab_destroy(struct slab *sys);
-void slab_reset(struct slab *sys);
+void slab_destroy(struct slab *slab);
+void slab_reset(struct slab *slab);
 
-void *slab_alloc(struct slab *sys);
-void  slab_free (struct slab *sys, void *ptr);
+void *slab_alloc(struct slab *slab);
+void  slab_free (struct slab *slab, void *ptr);
 
-void slab_iterate(struct slab *sys, void (*func)(void *, void *), void *userdata);
-
-void slab_trim(struct slab *slab);
+void slab_iterate(struct slab *slab, void (*func)(void *, void *), void *userdata);
 
 #endif
 
@@ -117,7 +115,11 @@ slab_alloc_page_posix(size_t size)
 #define SLAB_CLR_BIT(b,i) ((b)[(i)/SLAB_WORD_BITS] &= ~(1u<<((i)%SLAB_WORD_BITS)))
 #define SLAB_GET_BIT(b,i) (((b)[(i)/SLAB_WORD_BITS] >> (i%SLAB_WORD_BITS)) & 1u)
 
-// Intrusive doubly-linked list
+#define SLAB_MIN_ALLOC 16
+#define SLAB_AVAIL_WORDS ((int) SLAB_DIVIDE_ROUND_UP(SLAB_PAGE_SIZE / SLAB_MIN_ALLOC, SLAB_WORD_BITS))
+
+#define SLAB_GET_BASE(p) ((uintptr_t) (p) & ~(uintptr_t) (SLAB_PAGE_SIZE - 1))
+#define SLAB_GET_FOOTER(b) ((struct slab_footer *) ((b) + SLAB_PAGE_SIZE) - 1)
 
 #define SLAB_container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 
@@ -134,8 +136,25 @@ struct slab_list_node {
 	struct slab_list_node *prev;
 };
 
-struct list {
+struct slab_list {
 	struct slab_list_node head;
+	size_t count;
+};
+
+struct slab_footer {
+	struct slab_list_node node;
+	unsigned int avail[SLAB_AVAIL_WORDS];
+	int numelems;
+};
+
+struct slab {
+	struct slab_list empty;
+	struct slab_list partial;
+	struct slab_list full;
+	void (*ctor)(void *, int);
+	void (*dtor)(void *, int);
+	int elemsz;
+	int maxelems;
 };
 
 static inline void
@@ -146,101 +165,87 @@ slab_link_nodes(struct slab_list_node *n1, struct slab_list_node *n2)
 }
 
 static inline void
-slab_list_create(struct list *list)
+slab_list_create(struct slab_list *list)
 {
 	list->head.next = &list->head;
 	list->head.prev = &list->head;
+	list->count = 0;
 }
 
 static inline void
-slab_list_push_back(struct list *list, struct slab_list_node *node)
+slab_list_push_back(struct slab_list *list, struct slab_list_node *node)
 {
 	slab_link_nodes(list->head.prev, node);
 	slab_link_nodes(node, &list->head);
+	list->count++;
 }
 
 static inline void
-slab_list_remove(struct slab_list_node *node)
+slab_list_remove(struct slab_list *list, struct slab_list_node *node)
 {
 	slab_link_nodes(node->prev, node->next);
 	node->next = NULL;
 	node->prev = NULL;
+	list->count--;
 }
 
 static inline struct slab_list_node *
-slab_list_pop_front(struct list *list)
+slab_list_pop_front(struct slab_list *list)
 {
 	struct slab_list_node *node;
 	node = list->head.next;
 	if (node == &list->head)
 		return NULL;
-	slab_list_remove(node);
+	slab_list_remove(list, node);
 	return node;
 }
 
 static inline bool
-slab_list_is_empty(struct list *list)
+slab_list_is_empty(struct slab_list *list)
 {
 	return list->head.next == &list->head;
 }
 
-#define SLAB_MIN_ALLOC 16
-#define SLAB_AVAIL_WORDS ((int) SLAB_DIVIDE_ROUND_UP(SLAB_PAGE_SIZE / SLAB_MIN_ALLOC, SLAB_WORD_BITS))
-
-#define SLAB_GET_BASE(p) ((uintptr_t) (p) & ~(uintptr_t) (SLAB_PAGE_SIZE - 1))
-#define SLAB_GET_FOOTER(b) ((struct slab_footer *) ((b) + SLAB_PAGE_SIZE) - 1)
-
-struct slab_footer {
-	struct slab_list_node node;
-	unsigned int avail[SLAB_AVAIL_WORDS];
-	int numelems;
-};
-
-struct slab {
-	struct list empty;
-	struct list partial;
-	struct list full;
-	void (*ctor)(void *, int);
-	void (*dtor)(void *, int);
-	int elemsz;
-	int maxelems;
-};
-
-static void slab_noop_ctor_or_dtor(void *ptr, int elemsz) { (void)ptr; (void)elemsz; }
+static void
+slab_noop_ctor_or_dtor(void *ptr, int elemsz)
+{
+	(void)ptr;
+	(void)elemsz;
+}
 
 static void
-slab_grow(struct slab *sys)
+slab_grow(struct slab *slab)
 {
 	uintptr_t base = (uintptr_t) SLAB_alloc_page(SLAB_PAGE_SIZE);
 	struct slab_footer *footer = SLAB_GET_FOOTER(base);
 	memset(footer, 0, sizeof *footer);
-	for (int i = 0; i < sys->maxelems; i++) {
-		void *ptr = (void *) (base + i * sys->elemsz);
-		sys->ctor(ptr, sys->elemsz);
+	for (int i = 0; i < slab->maxelems; i++) {
+		void *ptr = (void *) (base + i * slab->elemsz);
+		slab->ctor(ptr, slab->elemsz);
 		SLAB_SET_BIT(footer->avail, i);
 	}
-	slab_list_push_back(&sys->empty, &footer->node);
+	slab_list_push_back(&slab->empty, &footer->node);
 }
 
 static void
-slab_release(struct slab *sys, struct slab_list_node *node)
+slab_release(struct slab *slab, struct slab_list *list, struct slab_list_node *node)
 {
-	slab_list_remove(node);
+	slab_list_remove(list, node);
 	uintptr_t base = SLAB_GET_BASE(node);
-	for (int i = 0; i < sys->maxelems; i++) {
-		void *ptr = (void *) (base + i * sys->elemsz);
-		sys->dtor(ptr, sys->elemsz);
+	for (int i = 0; i < slab->maxelems; i++) {
+		void *ptr = (void *) (base + i * slab->elemsz);
+		slab->dtor(ptr, slab->elemsz);
 	}
 	SLAB_free_page((void *) base);
 }
 
 static void
-slab_release_list(struct slab *sys, struct list *list)
+slab_release_list(struct slab *slab, struct slab_list *list)
 {
 	struct slab_list_node *node = list->head.next;
 	while (node != &list->head) {
 		struct slab_list_node *next = node->next;
-		slab_release(sys, node);
+		slab_release(slab, list, node);
 		node = next;
 	}
 }
@@ -255,63 +260,64 @@ slab_create(int elemsz, void (*ctor)(void *, int), void (*dtor)(void *, int))
 		return NULL;
 	}
 
-	struct slab *sys = SLAB_malloc(sizeof *sys);
-	if (!sys) {
+	struct slab *slab = SLAB_malloc(sizeof *slab);
+	if (!slab) {
 		return NULL;
 	}
-	memset(sys, 0, sizeof *sys);
+	memset(slab, 0, sizeof *slab);
 
-	slab_list_create(&sys->empty);
-	slab_list_create(&sys->partial);
-	slab_list_create(&sys->full);
+	slab_list_create(&slab->empty);
+	slab_list_create(&slab->partial);
+	slab_list_create(&slab->full);
 
-	sys->ctor = ctor ? ctor : slab_noop_ctor_or_dtor;
-	sys->dtor = dtor ? dtor : slab_noop_ctor_or_dtor;
-	sys->elemsz = elemsz;
-	sys->maxelems = (SLAB_PAGE_SIZE - sizeof (struct slab_footer)) / sys->elemsz;
+	slab->ctor = ctor ? ctor : slab_noop_ctor_or_dtor;
+	slab->dtor = dtor ? dtor : slab_noop_ctor_or_dtor;
+	slab->elemsz = elemsz;
+	slab->maxelems = (SLAB_PAGE_SIZE - sizeof (struct slab_footer)) / slab->elemsz;
 
-	return sys;
+	return slab;
 }
 
 void
-slab_destroy(struct slab *sys)
+slab_destroy(struct slab *slab)
 {
-	slab_release_list(sys, &sys->empty);
-	slab_release_list(sys, &sys->partial);
-	slab_release_list(sys, &sys->full);
-	SLAB_free(sys);
+	slab_release_list(slab, &slab->empty);
+	slab_release_list(slab, &slab->partial);
+	slab_release_list(slab, &slab->full);
+	SLAB_free(slab);
 }
 
 static void
-slab_reset_list(struct slab *sys, struct list *list)
+slab_reset_list(struct slab *slab, struct slab_list *list)
 {
 	SLAB_FOR_IN_LIST(footer, *list, struct slab_footer, node) {
-		for (int idx = 0; idx < sys->maxelems; idx++) {
+		for (int idx = 0; idx < slab->maxelems; idx++) {
 			SLAB_SET_BIT(footer->avail, idx);
 		}
-		slab_list_remove(&footer->node);
-		slab_list_push_back(&sys->empty, &footer->node);
+		slab_list_remove(list, &footer->node);
+		slab_list_push_back(&slab->empty, &footer->node);
 	}
 }
 
 void
-slab_reset(struct slab *sys)
+slab_reset(struct slab *slab)
 {
-	slab_reset_list(sys, &sys->partial);
-	slab_reset_list(sys, &sys->full);
+	slab_reset_list(slab, &slab->partial);
+	slab_reset_list(slab, &slab->full);
 }
 
 void *
-slab_alloc(struct slab *sys)
+slab_alloc(struct slab *slab)
 {
-	if (slab_list_is_empty(&sys->partial)) {
-		if (slab_list_is_empty(&sys->empty)) {
-			slab_grow(sys);
+	if (slab_list_is_empty(&slab->partial)) {
+		if (slab_list_is_empty(&slab->empty)) {
+			slab_grow(slab);
 		}
-		slab_list_push_back(&sys->partial, slab_list_pop_front(&sys->empty));
+		// empty -> partial
+		slab_list_push_back(&slab->partial, slab_list_pop_front(&slab->empty));
 	}
 
-	struct slab_list_node *node = sys->partial.head.next;
+	struct slab_list_node *node = slab->partial.head.next;
 	struct slab_footer *footer = SLAB_container_of(node, struct slab_footer, node);
 
 	int idx = -1;
@@ -324,34 +330,51 @@ slab_alloc(struct slab *sys)
 	}
 	SLAB_CLR_BIT(footer->avail, idx);
 
-	if (++footer->numelems == sys->maxelems) {
-		slab_list_remove(&footer->node);
-		slab_list_push_back(&sys->full, &footer->node);
+	footer->numelems++;
+	if (footer->numelems == slab->maxelems) {
+		// partial -> full
+		slab_list_remove(&slab->partial, &footer->node);
+		slab_list_push_back(&slab->full, &footer->node);
 	}
 
 	uintptr_t base = SLAB_GET_BASE(node);
-	return (void *) (base + idx * sys->elemsz);
-}
-
-void
-slab_free(struct slab *sys, void *ptr)
-{
-	uintptr_t base = SLAB_GET_BASE(ptr);
-	struct slab_footer *footer = SLAB_GET_FOOTER(base);
-	int idx = ((uintptr_t) ptr - base) / sys->elemsz;
-
-	SLAB_SET_BIT(footer->avail, idx);
-	
-	if (!--footer->numelems) {
-		slab_list_remove(&footer->node);
-		slab_list_push_back(&sys->empty, &footer->node);
-	}
-	
-	// TODO trigger garbage collection if ratio too extreme
+	return (void *) (base + idx * slab->elemsz);
 }
 
 static void
-slab_iterate_list(struct list *list, int elemsz, int maxelems,
+slab_trim(struct slab *slab)
+{
+	while (slab->empty.count > slab->full.count + slab->partial.count) {
+		slab_release(slab, &slab->empty, slab->empty.head.next);
+	}
+}
+
+void
+slab_free(struct slab *slab, void *ptr)
+{
+	uintptr_t base = SLAB_GET_BASE(ptr);
+	struct slab_footer *footer = SLAB_GET_FOOTER(base);
+	int idx = ((uintptr_t) ptr - base) / slab->elemsz;
+
+	SLAB_SET_BIT(footer->avail, idx);
+	
+	if (footer->numelems == slab->maxelems) {
+		// full -> partial
+		footer->numelems--;
+		slab_list_remove(&slab->full, &footer->node);
+		slab_list_push_back(&slab->partial, &footer->node);
+	} else {
+		// partial -> empty
+		footer->numelems--;
+		slab_list_remove(&slab->partial, &footer->node);
+		slab_list_push_back(&slab->empty, &footer->node);
+	}
+	
+	slab_trim(slab);
+}
+
+static void
+slab_iterate_list(struct slab_list *list, int elemsz, int maxelems,
 	void (*func)(void *, void *), void *userdata)
 {
 	SLAB_FOR_IN_LIST(footer, *list, struct slab_footer, node) {
@@ -366,17 +389,11 @@ slab_iterate_list(struct list *list, int elemsz, int maxelems,
 }
 
 void
-slab_iterate(struct slab *sys,
+slab_iterate(struct slab *slab,
 	void (*func)(void *, void *), void *userdata)
 {
-	slab_iterate_list(&sys->full, sys->elemsz, sys->maxelems, func, userdata);
-	slab_iterate_list(&sys->partial, sys->elemsz, sys->maxelems, func, userdata);
-}
-
-void
-slab_trim(struct slab *slab)
-{
-	// TODO garbage-collect
+	slab_iterate_list(&slab->full, slab->elemsz, slab->maxelems, func, userdata);
+	slab_iterate_list(&slab->partial, slab->elemsz, slab->maxelems, func, userdata);
 }
 
 #endif
