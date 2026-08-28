@@ -77,7 +77,9 @@ void *slab_alloc(SLAB *slab);
  * Thread safe.
  * Accepts NULL pointers.
  */
-void  slab_free(SLAB *slab, void *ptr);
+void slab_free(SLAB *slab, void *ptr);
+
+void slab_dump(SLAB *slab);
 
 #endif
 
@@ -139,6 +141,11 @@ slab_alloc_page_posix(size_t size)
 #  define SLAB_mutex_destroy(mtx) mtx_destroy(&mtx)
 #endif
 
+#ifndef SLAB_assert
+#  include <stdlib.h>
+#  define SLAB_assert(cond) do { if (!(cond)) abort(); } while (0)
+#endif
+
 #ifndef SLAB_PAGE_SIZE
 #  define SLAB_PAGE_SIZE 4096
 #endif
@@ -155,6 +162,8 @@ slab_alloc_page_posix(size_t size)
 
 #define SLAB_GET_BASE(p) ((uintptr_t) (p) & ~(uintptr_t) (SLAB_PAGE_SIZE - 1))
 #define SLAB_GET_FOOTER(b) ((struct slab_footer *) ((b) + SLAB_PAGE_SIZE) - 1)
+
+#define SLAB_FOOTER_SIGNATURE "SlabFoot"
 
 #define SLAB_container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 
@@ -177,6 +186,7 @@ struct slab_list {
 };
 
 struct slab_footer {
+	char signature[8];
 	struct slab_list_node node;
 	unsigned int avail[SLAB_AVAIL_WORDS];
 	int numelems;
@@ -223,6 +233,15 @@ slab_list_remove(struct slab_list *list, struct slab_list_node *node)
 	node->next = NULL;
 	node->prev = NULL;
 	list->count--;
+
+	// empty list consistency check
+	if (list->count == 0 ||
+		list->head.next == &list->head ||
+		list->head.prev == &list->head) {
+		SLAB_assert(list->count == 0);
+		SLAB_assert(list->head.next == &list->head);
+		SLAB_assert(list->head.prev == &list->head);
+	}
 }
 
 static inline struct slab_list_node *
@@ -257,6 +276,7 @@ slab_grow(SLAB *slab)
 	uintptr_t base = (uintptr_t) ptr;
 	struct slab_footer *footer = SLAB_GET_FOOTER(base);
 	memset(footer, 0, sizeof *footer);
+	memcpy(footer->signature, SLAB_FOOTER_SIGNATURE, 8);
 	for (int i = 0; i < slab->maxelems; i++) {
 		void *ptr = (void *) (base + i * slab->elemsz);
 		slab->ctor(ptr, slab->elemsz);
@@ -269,12 +289,15 @@ slab_grow(SLAB *slab)
 static void
 slab_release(SLAB *slab, struct slab_list *list, struct slab_list_node *node)
 {
+	struct slab_footer *footer = SLAB_container_of(node, struct slab_footer, node);
+	SLAB_assert(memcmp(footer->signature, SLAB_FOOTER_SIGNATURE, 8) == 0);
 	slab_list_remove(list, node);
 	uintptr_t base = SLAB_GET_BASE(node);
 	for (int i = 0; i < slab->maxelems; i++) {
 		void *ptr = (void *) (base + i * slab->elemsz);
 		slab->dtor(ptr, slab->elemsz);
 	}
+	memset(footer->signature, 0, 8);
 	SLAB_free_page((void *) base);
 }
 
@@ -420,6 +443,8 @@ slab_free(SLAB *slab, void *ptr)
 	struct slab_footer *footer = SLAB_GET_FOOTER(base);
 	int idx = ((uintptr_t) ptr - base) / slab->elemsz;
 
+	SLAB_assert(memcmp(footer->signature, SLAB_FOOTER_SIGNATURE, 8) == 0);
+
 	SLAB_SET_BIT(footer->avail, idx);
 	
 	if (footer->numelems == slab->maxelems) {
@@ -436,6 +461,30 @@ slab_free(SLAB *slab, void *ptr)
 	
 	slab_trim(slab);
 
+	SLAB_mutex_unlock(slab->coarse_lock);
+}
+
+#include <stdio.h>
+
+static void
+slab_dump_list(SLAB *slab, struct slab_list *list, const char *list_name)
+{
+	(void)slab;
+	printf("%s (%zu):\n", list_name, list->count);
+	SLAB_FOR_IN_LIST(footer, *list, struct slab_footer, node) {
+		printf("  %p - %p\n", (void *)footer, (void *)((char *)footer + SLAB_PAGE_SIZE));
+	}
+}
+
+void
+slab_dump(SLAB *slab)
+{
+	SLAB_mutex_lock(slab->coarse_lock);
+
+	slab_dump_list(slab, &slab->partial, "partial");
+	slab_dump_list(slab, &slab->full, "full");
+	slab_dump_list(slab, &slab->empty, "empty");
+	
 	SLAB_mutex_unlock(slab->coarse_lock);
 }
 
