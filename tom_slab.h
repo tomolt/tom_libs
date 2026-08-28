@@ -120,11 +120,13 @@ slab_ffs_ms(int x)
 #    define SLAB_free_page(ptr)   _aligned_free(ptr)
 #  else
 #    include <stdlib.h>
+#    include <stdio.h>
 static inline void *
 slab_alloc_page_posix(size_t size)
 {
 	void *ptr = NULL;
 	int s = posix_memalign(&ptr, size, size);
+	if (s) perror("posix_memalign: ");
 	return s == 0 ? ptr : NULL;
 }
 #    define SLAB_alloc_page(size) slab_alloc_page_posix(size)
@@ -358,12 +360,19 @@ slab_destroy(SLAB *slab)
 static void
 slab_reset_list(SLAB *slab, struct slab_list *list)
 {
-	SLAB_FOR_IN_LIST(footer, *list, struct slab_footer, node) {
+	struct slab_list_node *node = list->head.next;
+	while (node != &list->head) {
+		struct slab_list_node *next = node->next;
+		struct slab_footer *footer = SLAB_container_of(node, struct slab_footer, node);
+		
 		for (int idx = 0; idx < slab->maxelems; idx++) {
 			SLAB_SET_BIT(footer->avail, idx);
 		}
+		footer->numelems = 0;
 		slab_list_remove(list, &footer->node);
 		slab_list_push_back(&slab->empty, &footer->node);
+
+		node = next;
 	}
 }
 
@@ -399,6 +408,8 @@ slab_alloc(SLAB *slab)
 
 	struct slab_list_node *node = slab->partial.head.next;
 	struct slab_footer *footer = SLAB_container_of(node, struct slab_footer, node);
+
+	SLAB_assert(footer->numelems < slab->maxelems);
 
 	int idx = -1;
 	for (int w = 0; w < SLAB_AVAIL_WORDS; w++) {
@@ -444,17 +455,25 @@ slab_free(SLAB *slab, void *ptr)
 	int idx = ((uintptr_t) ptr - base) / slab->elemsz;
 
 	SLAB_assert(memcmp(footer->signature, SLAB_FOOTER_SIGNATURE, 8) == 0);
+	SLAB_assert(footer->numelems > 0);
 
 	SLAB_SET_BIT(footer->avail, idx);
 	
+	// FIXME if maxelems == 1, then we need to skip partial completely!!
 	if (footer->numelems == slab->maxelems) {
 		// full -> partial
 		footer->numelems--;
 		slab_list_remove(&slab->full, &footer->node);
 		slab_list_push_back(&slab->partial, &footer->node);
-	} else {
+	} else if (footer->numelems == 1) {
 		// partial -> empty
 		footer->numelems--;
+
+		// consistency check
+		for (int i = 0; i < slab->maxelems; i++) {
+			SLAB_assert(SLAB_GET_BIT(footer->avail, i));
+		}
+
 		slab_list_remove(&slab->partial, &footer->node);
 		slab_list_push_back(&slab->empty, &footer->node);
 	}

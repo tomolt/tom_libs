@@ -4,8 +4,10 @@
 #include <string.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <assert.h>
 
 #define SLAB_IMPLEMENTATION
+#define SLAB_assert(cond) assert(cond)
 #include <tom_slab.h>
 
 #define CANARY_SIZE 16
@@ -35,6 +37,7 @@ op_alloc()
 	if (num_items >= MAX_ITEMS) return;
 
 	struct item *item = slab_alloc(slab);
+	SLAB_assert(item != NULL);
 
 	getentropy(item->canary, CANARY_SIZE);
 
@@ -91,7 +94,6 @@ const struct op_option op_table[] = {
 int
 main()
 {
-	SLAB *slab;
 	slab = slab_create(sizeof(struct item), NULL, NULL);
 
 	float total_weight = 0;
@@ -115,9 +117,6 @@ main()
 			unif -= norm_weight;
 		}
 	}
-
-	void *elem = slab_alloc(slab);
-	slab_free(slab, elem);
 
 	slab_destroy(slab);
 
