@@ -460,7 +460,10 @@ slab_free(SLAB *slab, void *ptr)
 	int idx = ((uintptr_t) ptr - base) / slab->elemsz;
 
 	if (memcmp(footer->signature, SLAB_FOOTER_SIGNATURE, 8) != 0) {
-		SLAB_panic("slab_free outside of slab. Could be double free, memory overrun or corrupt pointer.");
+		SLAB_panic("slab_free() not in slab page. Could be double free, memory overrun or corrupt pointer.");
+	}
+	if (SLAB_GET_BIT(footer->avail, idx)) {
+		SLAB_panic("slab double free.");
 	}
 	SLAB_assert(footer->numelems > 0);
 
