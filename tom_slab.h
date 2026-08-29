@@ -18,6 +18,8 @@
  * Macros that may be declared before including this header:
  * SLAB_IMPLEMENTATION
  * SLAB_PAGE_SIZE
+ * SLAB_assert
+ * SLAB_panic
  * SLAB_ffs
  * SLAB_malloc
  * SLAB_free
@@ -78,8 +80,6 @@ void *slab_alloc(SLAB *slab);
  * Accepts NULL pointers.
  */
 void slab_free(SLAB *slab, void *ptr);
-
-void slab_dump(SLAB *slab);
 
 #endif
 
@@ -146,6 +146,11 @@ slab_alloc_page_posix(size_t size)
 #ifndef SLAB_assert
 #  include <stdlib.h>
 #  define SLAB_assert(cond) do { if (!(cond)) abort(); } while (0)
+#endif
+
+#ifndef SLAB_panic
+#  include <stdlib.h>
+#  define SLAB_panic(...) do { fprintf(stderr, __VA_ARGS__); abort(); } while (0)
 #endif
 
 #ifndef SLAB_PAGE_SIZE
@@ -454,7 +459,9 @@ slab_free(SLAB *slab, void *ptr)
 	struct slab_footer *footer = SLAB_GET_FOOTER(base);
 	int idx = ((uintptr_t) ptr - base) / slab->elemsz;
 
-	SLAB_assert(memcmp(footer->signature, SLAB_FOOTER_SIGNATURE, 8) == 0);
+	if (memcmp(footer->signature, SLAB_FOOTER_SIGNATURE, 8) != 0) {
+		SLAB_panic("slab_free outside of slab. Could be double free, memory overrun or corrupt pointer.");
+	}
 	SLAB_assert(footer->numelems > 0);
 
 	SLAB_SET_BIT(footer->avail, idx);
@@ -480,30 +487,6 @@ slab_free(SLAB *slab, void *ptr)
 	
 	slab_trim(slab);
 
-	SLAB_mutex_unlock(slab->coarse_lock);
-}
-
-#include <stdio.h>
-
-static void
-slab_dump_list(SLAB *slab, struct slab_list *list, const char *list_name)
-{
-	(void)slab;
-	printf("%s (%zu):\n", list_name, list->count);
-	SLAB_FOR_IN_LIST(footer, *list, struct slab_footer, node) {
-		printf("  %p - %p\n", (void *)footer, (void *)((char *)footer + SLAB_PAGE_SIZE));
-	}
-}
-
-void
-slab_dump(SLAB *slab)
-{
-	SLAB_mutex_lock(slab->coarse_lock);
-
-	slab_dump_list(slab, &slab->partial, "partial");
-	slab_dump_list(slab, &slab->full, "full");
-	slab_dump_list(slab, &slab->empty, "empty");
-	
 	SLAB_mutex_unlock(slab->coarse_lock);
 }
 
