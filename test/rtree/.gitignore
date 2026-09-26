@@ -1,3 +1,9 @@
 /*.o
 /test
+
 /perf.data*
+
+# GCOV Coverage
+/*.gcno
+/*.gcda
+/report/

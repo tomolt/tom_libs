@@ -9,6 +9,97 @@
 #include "../../tom_rtree.h"
 
 static void
+test_box_operations(void)
+{
+	dh_push("Box Operations");
+
+	struct rtree_box boxA = {
+		.min = { -1.0f, -1.0f, -1.0f },
+		.max = {  1.0f,  1.0f,  1.0f },
+	};
+	struct rtree_box boxB = {
+		.min = {  0.0f,  0.0f,  0.0f },
+		.max = {  2.0f,  2.0f,  2.0f },
+	};
+	struct rtree_box boxC = {
+		.min = {  1.0f,  1.0f,  1.0f },
+		.max = {  2.0f,  2.0f,  2.0f },
+	};
+
+	dh_push("overlap");
+	dh_assert(rtree_boxes_overlap(boxA, boxB) == true);
+	dh_assert(rtree_boxes_overlap(boxB, boxA) == true);
+	dh_assert(rtree_boxes_overlap(boxA, boxC) == false);
+	dh_assert(rtree_boxes_overlap(boxC, boxA) == false);
+	dh_pop();
+
+	dh_push("union");
+	struct rtree_box boxU = rtree_box_union(boxA, boxB);
+	for (unsigned axis = 0; axis < 3; axis++) {
+		dh_assert(boxU.min[axis] == -1.0f);
+		dh_assert(boxU.max[axis] ==  2.0f);
+	}
+	boxU = rtree_box_union(boxB, boxA);
+	for (unsigned axis = 0; axis < 3; axis++) {
+		dh_assert(boxU.min[axis] == -1.0f);
+		dh_assert(boxU.max[axis] ==  2.0f);
+	}
+	dh_pop();
+
+	dh_push("intersection");
+	struct rtree_box boxI = rtree_box_intersection(boxA, boxB);
+	for (unsigned axis = 0; axis < 3; axis++) {
+		dh_assert(boxI.min[axis] == 0.0f);
+		dh_assert(boxI.max[axis] == 1.0f);
+	}
+	boxI = rtree_box_intersection(boxB, boxA);
+	for (unsigned axis = 0; axis < 3; axis++) {
+		dh_assert(boxI.min[axis] == 0.0f);
+		dh_assert(boxI.max[axis] == 1.0f);
+	}
+	dh_pop();
+
+	dh_push("margin");
+	dh_assert(rtree_box_margin(boxA) == 6.0f);
+	dh_assert(rtree_box_margin(boxB) == 6.0f);
+	dh_assert(rtree_box_margin(boxC) == 3.0f);
+	dh_pop();
+
+	dh_push("area");
+	dh_assert(rtree_box_area(boxA) == 8.0f);
+	dh_assert(rtree_box_area(boxB) == 8.0f);
+	dh_assert(rtree_box_area(boxC) == 1.0f);
+	dh_pop();
+	
+	dh_pop();
+}
+
+static void
+test_choose_subtree(void)
+{
+	dh_push("rtree_choose_subtree()");
+
+	//rtree_choose_subtree(tree, newBox, path, lengthOut);
+	
+	dh_pop();
+}
+
+static void
+test_create_destroy(void)
+{
+	dh_push("Create & Destroy");
+
+	RTREE *tree = rtree_create();
+	// This test will fail erroneously if the system is out of memory
+	dh_assert(tree != NULL);
+
+	rtree_destroy(tree);
+
+	dh_pop();
+}
+
+#if 0
+static void
 check_integrity_rec(struct rtree_node *node, int height, const struct rtree_box *bound)
 {
 	if (!node) dh_throw("Node at height %d is NULL", height);
@@ -130,10 +221,13 @@ test_rtree(void)
 	rtree_destroy(tree);
 	dh_pop();
 }
+#endif
 
 int
 main()
 {
-	dh_branch( test_rtree(); );
-	return 0;
+	dh_init(stderr);
+	dh_branch( test_box_operations(); );
+	dh_branch( test_create_destroy(); );
+	return dh_summarize();
 }

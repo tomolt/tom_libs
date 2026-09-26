@@ -6,6 +6,7 @@
 
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 #define RTREE_DIMENSION 3
 
@@ -32,7 +33,7 @@ size_t   rtree_search(RTREE *tree, RTREE_ID *results, size_t maxResults);
 
 #ifdef RTREE_IMPLEMENTATION
 
-#include <stdint.h>
+#include <string.h>
 
 #ifndef RTREE_malloc
 #  include <stdlib.h>
@@ -95,6 +96,7 @@ struct rtree_node {
 struct rtree {
 	RTREE_rwlock_t     lock;
 	struct rtree_node *root;
+	struct rtree_box   rootBox;
 	unsigned           height;
 };
 
@@ -241,10 +243,51 @@ rtree_choose_split_axis(const struct rtree_box box[], unsigned count)
 	return bestAxis;
 }
 
-#if 1
-// Performs both the 'ChooseSplitIndex' and 'Distribute' Algorithms
+static unsigned
+rtree_choose_split_index(struct rtree_node *node, unsigned axis)
+{
+	// TODO this whole implementation is extremely naive and should be optimized and streamlined
+
+	unsigned order[RTREE_MAX_CHILDREN];
+	for (unsigned i = 0; i < node->count; i++) {
+		order[i] = i;
+	}
+
+#define RTREE_COMPARE_ALONG_AXIS(a, b)\
+	node->box[a].min[axis] < node->box[b].min[axis] ? -1 :\
+	node->box[a].min[axis] > node->box[b].min[axis] ?  1 :\
+	node->box[a].max[axis] < node->box[b].max[axis] ? -1 :\
+	node->box[a].max[axis] > node->box[b].max[axis] ?  1 :\
+	0
+
+	RTREE_SORT_INLINE(unsigned, RTREE_COMPARE_ALONG_AXIS, order, node->count);
+
+#undef RTREE_COMPARE_ALONG_AXIS
+
+	float costs[RTREE_MAX_CHILDREN];
+	memset(costs, 0, sizeof costs);
+	struct rtree_box belowUnion = node->box[0];
+	struct rtree_box aboveUnion = node->box[node->count - 1];
+	for (unsigned i = 1; i < node->count; i++) {
+		costs[i] += rtree_box_margin(belowUnion);
+		costs[node->count - 1 - i] += rtree_box_margin(aboveUnion);
+		
+		belowUnion = rtree_box_union(belowUnion, node->box[i]);
+		aboveUnion = rtree_box_union(aboveUnion, node->box[node->count - 1 - i]);
+	}
+
+	unsigned splitIndex = RTREE_MIN_CHILDREN;
+	for (unsigned d = RTREE_MIN_CHILDREN + 1; d < node->count - RTREE_MIN_CHILDREN; d++) {
+		if (costs[d] < costs[splitIndex]) {
+			splitIndex = d;
+		}
+	}
+
+	return splitIndex;
+}
+
 static struct rtree_node *
-rtree_distribute(struct rtree_node *node, unsigned axis)
+rtree_distribute(struct rtree_node *node, unsigned axis, unsigned splitIndex)
 {
 	unsigned order[RTREE_MAX_CHILDREN];
 	for (unsigned i = 0; i < node->count; i++) {
@@ -262,18 +305,10 @@ rtree_distribute(struct rtree_node *node, unsigned axis)
 
 #undef RTREE_COMPARE_ALONG_AXIS
 
-	unsigned splitIndex;
-	for (unsigned d = RTREE_MIN_CHILDREN; d < node->count - RTREE_MIN_CHILDREN; d++) {
-		
-	}
-
 	struct rtree_box sortedBoxes[RTREE_MAX_CHILDREN];
-	for (unsigned i = 0; i < node->count; i++) {
-		sortedBoxes[i] = node->box[order[i]];
-	}
-
 	union rtree_child sortedChildren[RTREE_MAX_CHILDREN];
 	for (unsigned i = 0; i < node->count; i++) {
+		sortedBoxes[i] = node->box[order[i]];
 		sortedChildren[i] = node->child[order[i]];
 	}
 
@@ -299,9 +334,9 @@ static struct rtree_node *
 rtree_split(struct rtree_node *node)
 {
 	unsigned axis = rtree_choose_split_axis(node->box, node->count);
-	return rtree_distribute(node, axis);
+	unsigned index = rtree_choose_split_index(node, axis);
+	return rtree_distribute(node, axis, index);
 }
-#endif
 
 #if 0
 static void
