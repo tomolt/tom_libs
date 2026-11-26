@@ -8,6 +8,66 @@
 #define RTREE_IMPLEMENTATION
 #include "../../tom_rtree.h"
 
+static RTREE *
+build_tree_single_level(void)
+{
+	RTREE *tree = rtree_create();
+	struct rtree_node *root = RTREE_malloc(sizeof(struct rtree_node));
+	root->count = RTREE_MAX_CHILDREN / 2;
+	for (unsigned i = 0; i < root->count; i++) {
+		float lo = (float)i / root->count;
+		float hi = (float)(i + 1) / root->count;
+		root->child[i].oid = i + 1;
+		root->box[i] = (struct rtree_box){
+			.min = { lo, lo, lo },
+			.max = { hi, hi, hi },
+		};
+	}
+	tree->rootBox = (struct rtree_box){
+		.min = { 0.0f, 0.0f, 0.0f },
+		.max = { 1.0f, 1.0f, 1.0f },
+	};
+	tree->root = root;
+	tree->height = 1;
+	return tree;
+}
+
+static RTREE *
+build_tree_two_level(void)
+{
+	RTREE *tree = rtree_create();
+	struct rtree_node *root = RTREE_malloc(sizeof(struct rtree_node));
+	unsigned fanout = RTREE_MAX_CHILDREN / 2;
+	root->count = fanout;
+	for (unsigned i = 0; i < fanout; i++) {
+		float i_lo = (float)i / fanout;
+		float i_hi = (float)(i + 1) / fanout;
+		struct rtree_node *i_node = RTREE_malloc(sizeof(struct rtree_node));
+		i_node->count = fanout;
+		for (unsigned j = 0; j < fanout; j++) {
+			float j_lo = (float)j / fanout;
+			float j_hi = (float)(j + 1) / fanout;
+			i_node->child[j].oid = j + 1;
+			i_node->box[i] = (struct rtree_box){
+				.min = { i_lo, j_lo, 0.0f },
+				.max = { i_hi, j_hi, 1.0f },
+			};
+		}
+		root->box[i] = (struct rtree_box){
+			.min = { i_lo, 0.0f, 0.0f },
+			.max = { i_hi, 1.0f, 1.0f },
+		};
+		root->child[i].ptr = i_node;
+	}
+	tree->rootBox = (struct rtree_box){
+		.min = { 0.0f, 0.0f, 0.0f },
+		.max = { 1.0f, 1.0f, 1.0f },
+	};
+	tree->root = root;
+	tree->height = 2;
+	return tree;
+}
+
 static void
 test_box_operations(void)
 {
@@ -75,26 +135,45 @@ test_box_operations(void)
 }
 
 static void
-test_choose_subtree(void)
-{
-	dh_push("rtree_choose_subtree()");
-
-	//rtree_choose_subtree(tree, newBox, path, lengthOut);
-	
-	dh_pop();
-}
-
-static void
 test_create_destroy(void)
 {
 	dh_push("Create & Destroy");
-
 	RTREE *tree = rtree_create();
+
 	// This test will fail erroneously if the system is out of memory
 	dh_assert(tree != NULL);
 
 	rtree_destroy(tree);
+	dh_pop();
+}
 
+static void
+test_choose_subtree(void)
+{
+	dh_push("rtree_choose_subtree()");
+	RTREE *tree = build_tree_two_level();
+
+	struct rtree_node *path[RTREE_MAX_CHILDREN];
+	unsigned length;
+	for (unsigned i = 0; i < tree->root->count; i++) {
+		dh_push("child %u", i);
+		
+		struct rtree_box newBox;
+		for (unsigned axis = 0; axis < RTREE_DIMENSION; axis++) {
+			newBox.min[axis] = (float)i / tree->root->count;
+			newBox.max[axis] = (float)(i + 1) / tree->root->count;
+		}
+
+		struct rtree_node *leaf = rtree_choose_subtree(tree, newBox, path, &length);
+		dh_assert(leaf != NULL);
+		dh_assert(leaf == tree->root->child[i].ptr);
+		dh_assert(length == 1);
+		dh_assert(path[0] == tree->root);
+
+		dh_pop();
+	}
+
+	rtree_destroy(tree);
 	dh_pop();
 }
 
@@ -229,5 +308,6 @@ main()
 	dh_init(stderr);
 	dh_branch( test_box_operations(); );
 	dh_branch( test_create_destroy(); );
+	dh_branch( test_choose_subtree(); );
 	return dh_summarize();
 }
